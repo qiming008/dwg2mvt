@@ -1,0 +1,19 @@
+# 可选：仅启动 GeoServer，供后端发布 MVT 使用
+# 后端与前端需在宿主机安装 LibreDWG、GDAL 后本地运行
+version: "3.9"
+services:
+  geoserver:
+    image: docker.io/geoserver/geoserver:2.25
+    ports:
+      - "8080:8080"
+    environment:
+      GEOSERVER_ADMIN_PASSWORD: geoserver
+      GEOSERVER_ADMIN_USER: admin
+    volumes:
+      - geoserver_data:/opt/geoserver/data_dir
+    # 若希望后端生成的 GPKG 被 GeoServer 直接访问，可将 backend/data 挂载进来，例如：
+    # - ./backend/data:/data:ro
+    # 并在后端配置中将 GPKG 输出到 /data/jobs/... 或通过 REST 使用 file:///data/...
+
+volumes:
+  geoserver_data: {}
