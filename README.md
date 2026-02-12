@@ -15,14 +15,14 @@
 
 ```mermaid
 graph LR
-    A[DWG 文件] --> B(LibreDWG: dwg2dxf)
-    B --> C[DXF 文件]
-    C --> D(GDAL: ogr2ogr)
-    D --> E[GeoPackage (EPSG:3857)]
-    E --> F{GeoServer}
-    F -->|REST API| G[发布图层]
-    G --> H[MVT / WMTS 服务]
-    H --> I[前端 OpenLayers]
+    A["DWG 文件"] --> B("LibreDWG: dwg2dxf")
+    B --> C["DXF 文件"]
+    C --> D("GDAL: ogr2ogr")
+    D --> E["GeoPackage (EPSG:3857)"]
+    E --> F{"GeoServer"}
+    F -->|"REST API"| G["发布图层"]
+    G --> H["MVT / WMTS 服务"]
+    H --> I["前端 OpenLayers"]
 ```
 
 ## 环境要求
