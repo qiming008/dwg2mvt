@@ -9,6 +9,7 @@ import shutil
 import time
 import struct
 from pathlib import Path
+import math
 
 from app.config import settings
 
@@ -232,86 +233,141 @@ def parse_dxf_layers(dxf_path: Path) -> dict[str, str]:
         print(f"Layer parsing failed: {e}")
     return layers
 
-def parse_dxf_alignments(dxf_path: Path) -> dict[str, tuple[float, float, float, float, float]]:
+def extract_dxf_attributes(dxf_path: Path) -> dict[str, dict]:
     """
-    Parse DXF to extract text alignment points for Text/MText.
-    Returns dict: Handle -> (anchor_x, anchor_y, offset_x, offset_y, height)
-    offset_x/y is the shift needed if GDAL used InsertionPoint (Group 10) but Text uses AlignmentPoint (Group 11).
-    height is the text height (Group 40)
+    Parse DXF to extract attributes for entities.
+    Returns dict: Handle -> {
+        'type': str,
+        'ax': float, 'ay': float,       # Alignment (Text only)
+        'dx': float, 'dy': float,       # Geometry Shift (Text only)
+        'h': float,                     # Height (Text only)
+        'r': float,                     # Rotation (Group 50 or calculated from 11/21)
+        'c': str,                       # Color Hex (Group 62)
+        'lw': int,                      # Line Weight (Group 370)
+        'fill': str                     # Fill Color Hex (Group 62 for HATCH/SOLID)
+    }
     """
-    alignments = {}
+    results = {}
     try:
         with open(dxf_path, "r", encoding="utf-8", errors="ignore") as f:
-            # Use iterator directly to avoid loading whole file into memory
             iterator = iter(f)
             
             current_handle = None
             current_type = None
             attrs = {}
             
-            def calc_props(type_, attrs):
-                # Default to Bottom Left (0, 0), No Offset (0, 0)
-                ax, ay = 0.0, 0.0
-                off_x, off_y = 0.0, 0.0
-                height = 0.0
+            def process_entity(type_, attrs):
+                data = {'type': type_}
                 
-                # Group 40: Text Height
-                try: height = attrs.get('40', 0.0)
-                except: pass
-                
-                if type_ == 'MTEXT':
-                    # Group 71: Attachment point
-                    # 1=TL, 2=TC, 3=TR
-                    # 4=ML, 5=MC, 6=MR
-                    # 7=BL, 8=BC, 9=BR
-                    ap = attrs.get('71', 1)
-                    if ap in (1, 2, 3): ay = 1.0 # Top
-                    elif ap in (4, 5, 6): ay = 0.5 # Middle
-                    else: ay = 0.0 # Bottom
+                # 1. Color (Group 62)
+                # If missing, it's ByLayer (256), which we skip (handled by layer logic)
+                # If 0, it's ByBlock
+                color_hex = None
+                if '62' in attrs:
+                    try:
+                        c_idx = int(attrs['62'])
+                        if c_idx < 0: c_idx = -c_idx # Layer off but color persists
+                        if 0 <= c_idx < len(ACI_HEX):
+                            color_hex = ACI_HEX[c_idx]
+                            data['c'] = color_hex
+                    except: pass
+
+                # 2. Line Weight (Group 370)
+                # Values: -3 (Standard), -2 (ByBlock), -1 (ByLayer), 0-211 (1/100 mm)
+                if '370' in attrs:
+                    try:
+                        lw = int(attrs['370'])
+                        if lw >= 0:
+                            data['lw'] = lw
+                    except: pass
+
+                # 3. Fill Color for HATCH, SOLID, TRACE
+                if type_ in ('HATCH', 'SOLID', 'TRACE'):
+                    if color_hex:
+                        data['fill'] = color_hex
+                        # Ensure line color matches fill for solids to avoid borders
+                        if 'c' not in data: data['c'] = color_hex
+
+                # 4. Text Specifics
+                if type_ in ('TEXT', 'MTEXT'):
+                    # Rotation (Group 50)
+                    rotation = 0.0
+                    if '50' in attrs:
+                        try: rotation = -float(attrs['50']) # Convert CCW to CW for SLD/MapLibre
+                        except: pass
                     
-                    if ap in (1, 4, 7): ax = 0.0 # Left
-                    elif ap in (2, 5, 8): ax = 0.5 # Center
-                    else: ax = 1.0 # Right
-                    
-                elif type_ == 'TEXT':
-                    # Group 72: Horiz Alignment
-                    # 0=Left, 1=Center, 2=Right, 3=Aligned, 4=Middle, 5=Fit
-                    h = attrs.get('72', 0)
-                    # Group 73: Vert Alignment
-                    # 0=Baseline, 1=Bottom, 2=Middle, 3=Top
-                    v = attrs.get('73', 0)
-                    
-                    # Horizontal
-                    if h == 0: ax = 0.0 # Left
-                    elif h == 1: ax = 0.5 # Center
-                    elif h == 2: ax = 1.0 # Right
-                    elif h == 4: ax = 0.5 # Middle (Special)
-                    else: ax = 0.5 # Aligned/Fit (treat as center)
-                    
-                    # Vertical
-                    if v == 3: ay = 1.0 # Top
-                    elif v == 2: ay = 0.5 # Middle
-                    elif v == 1: ay = 0.0 # Bottom
-                    else: ay = 0.0 # Baseline
-                    
-                    # Special case: Middle (72=4) implies center vertical too
-                    if h == 4:
-                        ax, ay = 0.5, 0.5
-                    
-                    # Check for Geometry Offset (Text Aligned usually implies using Group 11)
-                    # If alignment is used (h!=0 or v!=0), GDAL might still put geom at Group 10.
-                    # We want to move it to Group 11.
-                    if h != 0 or v != 0:
-                        g10x = attrs.get('10', 0.0)
-                        g10y = attrs.get('20', 0.0)
-                        g11x = attrs.get('11', 0.0)
-                        g11y = attrs.get('21', 0.0)
+                    # MTEXT Direction Vector (Group 11, 21) overrides/supplements rotation
+                    # Usually MTEXT rotation is 0 and direction defines angle
+                    if type_ == 'MTEXT' and '11' in attrs and '21' in attrs:
+                        try:
+                            dx = float(attrs['11'])
+                            dy = float(attrs['21'])
+                            if dx != 0 or dy != 0:
+                                # Calculate angle from vector
+                                dir_angle = math.degrees(math.atan2(dy, dx))
+                                # DXF 50 is relative to X-axis, but if direction vector is present,
+                                # it defines the X-axis. 
+                                # Usually if 11/21 are present, they define the rotation.
+                                # Let's use the direction vector angle.
+                                # Convert CCW to CW for SLD/MapLibre
+                                rotation = -dir_angle
+                        except: pass
                         
-                        # Offset = Target(11) - Current(10)
-                        off_x = g11x - g10x
-                        off_y = g11y - g10y
+                    data['r'] = rotation
                         
-                return ax, ay, off_x, off_y, height
+                    # Height (Group 40)
+                    if '40' in attrs:
+                        try: data['h'] = float(attrs['40'])
+                        except: pass
+                        
+                    # Alignment
+                    ax, ay = 0.0, 0.0
+                    off_x, off_y = 0.0, 0.0
+                    
+                    if type_ == 'MTEXT':
+                        # Group 71: Attachment point
+                        ap = int(attrs.get('71', 1))
+                        if ap in (1, 2, 3): ay = 1.0 # Top
+                        elif ap in (4, 5, 6): ay = 0.5 # Middle
+                        else: ay = 0.0 # Bottom
+                        
+                        if ap in (1, 4, 7): ax = 0.0 # Left
+                        elif ap in (2, 5, 8): ax = 0.5 # Center
+                        else: ax = 1.0 # Right
+                        
+                    elif type_ == 'TEXT':
+                        h = int(attrs.get('72', 0))
+                        v = int(attrs.get('73', 0))
+                        
+                        if h == 0: ax = 0.0
+                        elif h == 1: ax = 0.5
+                        elif h == 2: ax = 1.0
+                        elif h == 4: ax = 0.5
+                        else: ax = 0.5
+                        
+                        if v == 3: ay = 1.0
+                        elif v == 2: ay = 0.5
+                        elif v == 1: ay = 0.0
+                        else: ay = 0.0
+                        
+                        if h == 4: ax, ay = 0.5, 0.5
+                        
+                        # Geometry Shift
+                        if h != 0 or v != 0:
+                            g10x = float(attrs.get('10', 0.0))
+                            g10y = float(attrs.get('20', 0.0))
+                            g11x = float(attrs.get('11', 0.0))
+                            g11y = float(attrs.get('21', 0.0))
+                            off_x = g11x - g10x
+                            off_y = g11y - g10y
+                            
+                    data['ax'] = ax
+                    data['ay'] = ay
+                    if off_x != 0 or off_y != 0:
+                        data['dx'] = off_x
+                        data['dy'] = off_y
+                        
+                return data
 
             try:
                 while True:
@@ -319,9 +375,9 @@ def parse_dxf_alignments(dxf_path: Path) -> dict[str, tuple[float, float, float,
                     value = next(iterator).strip()
                     
                     if code == '0':
-                        # Save previous entity if valid
-                        if current_handle and current_type in ('TEXT', 'MTEXT'):
-                            alignments[current_handle] = calc_props(current_type, attrs)
+                        if current_handle:
+                            res = process_entity(current_type, attrs)
+                            if res: results[current_handle] = res
                         
                         current_type = value
                         current_handle = None
@@ -332,22 +388,20 @@ def parse_dxf_alignments(dxf_path: Path) -> dict[str, tuple[float, float, float,
                             
                     elif code == '5':
                         current_handle = value
-                    elif code in ('71', '72', '73'):
-                        try:
-                            attrs[code] = int(value)
+                    elif code in ('10', '20', '11', '21', '40', '50'):
+                        try: attrs[code] = float(value) # Keep as float for coords/angles
                         except: pass
-                    elif code in ('10', '20', '11', '21', '40'):
-                        try:
-                            attrs[code] = float(value)
+                    elif code in ('62', '71', '72', '73', '370'):
+                        try: attrs[code] = int(value) # Keep as int for enums
                         except: pass
                         
             except StopIteration:
                 pass
                 
     except Exception as e:
-        print(f"Alignment parsing failed: {e}")
+        print(f"Attribute extraction failed: {e}")
         
-    return alignments
+    return results
 
 def apply_geometry_shift(blob, dx, dy):
     """Shift GeoPackage geometry blob by dx, dy"""
@@ -448,8 +502,8 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
         "--config", "DXF_INLINE_BLOCKS", "TRUE",
         "--config", "DXF_ATTRIBUTES", "TRUE",
         "-f", "GPKG",
-        "-s_srs", "EPSG:3857",
-        "-t_srs", "EPSG:3857",
+        # Do not force SRS here to allow large coordinates (e.g. millimeters) to be imported
+        # We will normalize/project later
         str(gpkg_path),
         str(dxf_path),
         "-skipfailures",
@@ -478,6 +532,18 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
     # Increase timeout to 1 hour for large/complex drawings
     ok, err = _run(cmd_gpkg, cwd=output_dir, timeout=3600)
     
+    # Check if we got entities
+    if ok and check_gpkg_count(gpkg_path) == 0:
+         print("Initial conversion resulted in 0 entities. Retrying without inline blocks...")
+         # Retry with DXF_INLINE_BLOCKS=FALSE (sometimes better for messy blocks)
+         cmd_retry = list(cmd_gpkg)
+         # Find and replace config
+         for i, arg in enumerate(cmd_retry):
+             if arg == "DXF_INLINE_BLOCKS":
+                 cmd_retry[i+1] = "FALSE"
+         
+         ok, err = _run(cmd_retry, cwd=output_dir, timeout=3600)
+
     # DEBUG: Log result
     try:
         with open(output_dir / "ogr_debug.log", "a", encoding="utf-8") as f:
@@ -522,6 +588,8 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
             c.execute("ALTER TABLE entities ADD COLUMN fill_color TEXT")
         if 'rotation' not in cols:
             c.execute("ALTER TABLE entities ADD COLUMN rotation REAL")
+        if 'line_width' not in cols:
+            c.execute("ALTER TABLE entities ADD COLUMN line_width REAL")
             
         # Add text specific style columns
         text_cols = {
@@ -537,30 +605,80 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
             if col_name not in cols:
                 c.execute(f"ALTER TABLE entities ADD COLUMN {col_name} {col_type}")
         
-        # 7. Parse DXF Text Alignments
-        if progress_callback: progress_callback(70, "正在解析文本对齐方式...")
+        # 7. Parse DXF Attributes (Alignments, Rotation, Color, Width)
+        if progress_callback: progress_callback(70, "正在解析实体属性(对齐/旋转/颜色/线宽)...")
         try:
-            alignments = parse_dxf_alignments(dxf_path)
-            if alignments:
-                # Update anchors
-                c.executemany(
-                    "UPDATE entities SET anchor_x=?, anchor_y=? WHERE EntityHandle=?", 
-                    [(v[0], v[1], k) for k, v in alignments.items()]
-                )
+            attrs_map = extract_dxf_attributes(dxf_path)
+            if attrs_map:
+                # Prepare data
+                anchors = []
+                shifts = []
+                sizes = []
+                rotations = []
+                text_colors = []
+                line_colors = []
+                fill_colors = []
+                line_widths = []
                 
-                # Apply geometry shifts for aligned text
-                shifts = [(v[2], v[3], k) for k, v in alignments.items() if v[2] != 0 or v[3] != 0]
+                for k, v in attrs_map.items():
+                    # Anchors
+                    if 'ax' in v:
+                        anchors.append((v['ax'], v['ay'], k))
+                    
+                    # Shifts
+                    if 'dx' in v:
+                        shifts.append((v['dx'], v['dy'], k))
+                        
+                    # Sizes
+                    if 'h' in v and v['h'] > 0:
+                        sizes.append((v['h'], k))
+                        
+                    # Rotations
+                    if 'r' in v:
+                        rotations.append((v['r'], k))
+                        
+                    # Colors
+                    if 'c' in v:
+                        color = v['c']
+                        if color == "#000000": color = "#FFFFFF"
+                        
+                        if v['type'] in ('TEXT', 'MTEXT'):
+                            text_colors.append((color, k))
+                        else:
+                            line_colors.append((color, k))
+                            
+                    # Fill Colors (Hatch/Solid)
+                    if 'fill' in v:
+                        fill = v['fill']
+                        # Handle colors for Black Background (Dark Mode)
+                        # If fill is black (#000000), convert to white (#FFFFFF) to be visible
+                        if fill == "#000000": 
+                            fill = "#FFFFFF"
+                        # If fill is white (#FFFFFF), keep it white
+                        elif fill == "#FFFFFF":
+                            pass
+                             
+                        fill_colors.append((fill, k))
+                        
+                    # Line Weights
+                    if 'lw' in v:
+                        line_widths.append((v['lw'], k))
+
+                # Update Anchors
+                if anchors:
+                    c.executemany(
+                        "UPDATE entities SET anchor_x=?, anchor_y=? WHERE EntityHandle=?", 
+                        anchors
+                    )
+                
+                # Apply geometry shifts
                 if shifts:
                     print(f"Applying geometry shift to {len(shifts)} text entities...")
                     try:
-                        # Optimized batch update using temporary table
                         c.execute("CREATE TEMPORARY TABLE IF NOT EXISTS text_shifts (handle TEXT PRIMARY KEY, dx REAL, dy REAL)")
                         c.execute("DELETE FROM text_shifts")
-                        
-                        # Bulk insert shifts
                         c.executemany("INSERT INTO text_shifts (dx, dy, handle) VALUES (?, ?, ?)", shifts)
                         
-                        # Select all affected geometries in one go
                         c.execute("""
                             SELECT e.EntityHandle, e.geom, s.dx, s.dy
                             FROM entities e
@@ -575,16 +693,13 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                             if new_blob != blob:
                                 geom_updates.append((new_blob, handle))
                                 
-                        # Bulk update
                         if geom_updates:
                             c.executemany("UPDATE entities SET geom=? WHERE EntityHandle=?", geom_updates)
                             
-                        # Cleanup
                         c.execute("DROP TABLE text_shifts")
                         
                     except Exception as e:
                         print(f"Batch geometry shift error: {e}")
-                        # Fallback to slow loop if batch fails
                         for dx, dy, handle in shifts:
                             try:
                                 c.execute("SELECT geom FROM entities WHERE EntityHandle=?", (handle,))
@@ -595,18 +710,14 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                                         c.execute("UPDATE entities SET geom=? WHERE EntityHandle=?", (new_blob, handle))
                             except: pass
 
-                # Update text size from Group 40 (Height)
-                sizes = [(v[4], k) for k, v in alignments.items() if v[4] > 0]
+                # Update Text Size
                 if sizes:
                     try:
-                        # Optimized batch update for text sizes using temp table
                         c.execute("CREATE TEMPORARY TABLE IF NOT EXISTS text_sizes (handle TEXT PRIMARY KEY, size REAL)")
                         c.execute("DELETE FROM text_sizes")
                         c.executemany("INSERT INTO text_sizes (size, handle) VALUES (?, ?)", sizes)
                         
-                        # Use UPDATE FROM syntax (SQLite >= 3.33) or standard correlated subquery
                         try:
-                            # Try UPDATE FROM first
                             c.execute("""
                                 UPDATE entities 
                                 SET text_size = text_sizes.size 
@@ -614,7 +725,6 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                                 WHERE entities.EntityHandle = text_sizes.handle
                             """)
                         except:
-                            # Fallback to subquery (slower but safe)
                             c.execute("""
                                 UPDATE entities 
                                 SET text_size = (SELECT size FROM text_sizes WHERE handle = entities.EntityHandle)
@@ -624,13 +734,47 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                         c.execute("DROP TABLE text_sizes")
                     except Exception as e:
                         print(f"Text size batch update error: {e}")
-                        # Fallback to loop
                         try:
                              c.executemany("UPDATE entities SET text_size=? WHERE EntityHandle=?", sizes)
                         except: pass
 
+                # Update Rotations (New)
+                if rotations:
+                     try:
+                         c.executemany("UPDATE entities SET text_angle=? WHERE EntityHandle=?", rotations)
+                         c.executemany("UPDATE entities SET rotation=COALESCE(rotation, ?) WHERE EntityHandle=?", rotations)
+                     except Exception as e:
+                         print(f"Rotation update error: {e}")
+                     
+                # Update Colors (New)
+                if text_colors:
+                    try:
+                        c.executemany("UPDATE entities SET text_color=? WHERE EntityHandle=?", text_colors)
+                    except Exception as e:
+                        print(f"Text color update error: {e}")
+                    
+                if line_colors:
+                    try:
+                        c.executemany("UPDATE entities SET line_color=? WHERE EntityHandle=?", line_colors)
+                    except Exception as e:
+                        print(f"Line color update error: {e}")
+                        
+                # Update Fill Colors (New)
+                if fill_colors:
+                    try:
+                        c.executemany("UPDATE entities SET fill_color=? WHERE EntityHandle=?", fill_colors)
+                    except Exception as e:
+                         print(f"Fill color update error: {e}")
+                         
+                # Update Line Widths (New)
+                if line_widths:
+                    try:
+                        c.executemany("UPDATE entities SET line_width=? WHERE EntityHandle=?", line_widths)
+                    except Exception as e:
+                        print(f"Line width update error: {e}")
+
         except Exception as e:
-            print(f"Alignment parsing warning: {e}")
+            print(f"Attribute parsing warning: {e}")
             
         # Remove text from Hatch entities (often pattern names like SOLID, HONEY)
         # We do this early to ensure it runs even if later steps fail
@@ -927,21 +1071,237 @@ def get_gpkg_bbox(gpkg_path: Path) -> tuple[bool, list[float] | None]:
     except Exception:
         return False, None
 
+def get_robust_bbox(gpkg_path: Path) -> tuple[float, float, float, float, float, float]:
+    """
+    Get robust bounding box using percentiles to ignore outliers.
+    Returns (min_x, max_x, min_y, max_y, robust_width, robust_height)
+    """
+    try:
+        csv_path = gpkg_path.with_suffix(".bbox.csv")
+        if csv_path.exists(): csv_path.unlink()
+        
+        cmd = [
+            settings.ogr2ogr_cmd,
+            "-f", "CSV",
+            str(csv_path),
+            str(gpkg_path),
+            "-dialect", "SQLite",
+            "-sql", "SELECT ST_MinX(geom) as x1, ST_MaxX(geom) as x2, ST_MinY(geom) as y1, ST_MaxY(geom) as y2 FROM entities"
+        ]
+        
+        ok, out = _run(cmd)
+        if not ok or not csv_path.exists():
+            return None
+            
+        x_vals = []
+        y_vals = []
+        
+        try:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                next(f, None)
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 4:
+                        try:
+                            x1 = float(parts[0].strip('"'))
+                            x2 = float(parts[1].strip('"'))
+                            y1 = float(parts[2].strip('"'))
+                            y2 = float(parts[3].strip('"'))
+                            x_vals.extend([x1, x2])
+                            y_vals.extend([y1, y2])
+                        except: pass
+        except: pass
+            
+        if csv_path.exists(): 
+            try: csv_path.unlink()
+            except: pass
+        
+        if not x_vals or not y_vals:
+            return None
+            
+        x_vals.sort()
+        y_vals.sort()
+        n = len(x_vals)
+        if n == 0: return None
+        
+        p10 = int(n * 0.1)
+        p90 = int(n * 0.9)
+        rx1, rx2 = x_vals[p10], x_vals[p90]
+        ry1, ry2 = y_vals[p10], y_vals[p90]
+        robust_w = rx2 - rx1
+        robust_h = ry2 - ry1
+        
+        p01 = int(n * 0.01)
+        p99 = int(n * 0.99)
+        sx1, sx2 = x_vals[p01], x_vals[p99]
+        sy1, sy2 = y_vals[p01], y_vals[p99]
+        
+        if robust_w > 0 and (sx2 - sx1) > robust_w * 20:
+            mid_x = (rx1 + rx2) / 2
+            sx1 = max(sx1, mid_x - robust_w * 10)
+            sx2 = min(sx2, mid_x + robust_w * 10)
+            
+        if robust_h > 0 and (sy2 - sy1) > robust_h * 20:
+            mid_y = (ry1 + ry2) / 2
+            sy1 = max(sy1, mid_y - robust_h * 10)
+            sy2 = min(sy2, mid_y + robust_h * 10)
+
+        return (sx1, sx2, sy1, sy2, robust_w, robust_h)
+
+    except Exception:
+        return None
+
 def normalize_coordinates(gpkg_path: Path) -> bool:
     """Check if coordinates are out of WGS84 bounds and shift to (0,0) if needed."""
-    ok, bbox = get_gpkg_bbox(gpkg_path)
-    if not ok or not bbox:
-        return False
+    
+    # 1. Get Robust Stats
+    stats = get_robust_bbox(gpkg_path)
+    
+    # Fallback if robust failed
+    if not stats:
+        ok, bbox = get_gpkg_bbox(gpkg_path)
+        if not ok or not bbox: return False
+        min_x, min_y, max_x, max_y = bbox
+        sx1, sx2, sy1, sy2 = min_x, max_x, min_y, max_y
+        robust_w, robust_h = max_x - min_x, max_y - min_y
+        cx, cy = (min_x + max_x) / 2, (min_y + max_y) / 2
+    else:
+        sx1, sx2, sy1, sy2, robust_w, robust_h = stats
+        # Use center of Safe Bounds (clamped) as the center
+        cx = (sx1 + sx2) / 2
+        cy = (sy1 + sy2) / 2
+        print(f"Robust Stats: W={robust_w:.2f}, H={robust_h:.2f}, Center=({cx:.2f}, {cy:.2f})")
 
-    min_x, min_y, max_x, max_y = bbox
-    if -190 <= min_x and max_x <= 190 and -95 <= min_y and max_y <= 95:
+    # If already normalized
+    if -200 <= sx1 and sx2 <= 200 and -100 <= sy1 and sy2 <= 100:
         return True
         
-    print(f"Coordinates out of bounds ({bbox}), normalizing...")
-    cx = (min_x + max_x) / 2
-    cy = (min_y + max_y) / 2
+    print(f"Normalizing... Center:({cx:.2f},{cy:.2f})")
     
-    # Get columns to avoid "geom, *" ambiguity
+    scale_factor = 1.0
+    # Determine scale factor based on ROBUST dimensions
+    if robust_w > 20000000 or robust_h > 20000000:
+        scale_factor = 0.001
+        print(f"Detected huge dimensions (Robust W:{robust_w:.0f}), scaling by 0.001...")
+    
+    # Check for Text Unit Mismatch (e.g. Geometry in Meters, Text in Millimeters)
+    text_scale_factor = scale_factor
+    try:
+        conn = sqlite3.connect(gpkg_path)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(entities)")
+        cols_info = {r[1] for r in c.fetchall()}
+        
+        if 'text_size' in cols_info:
+            # Check Max Text Size
+            c.execute("SELECT MAX(text_size) FROM entities WHERE text_size IS NOT NULL")
+            row = c.fetchone()
+            max_text = float(row[0]) if row and row[0] is not None else 0.0
+
+            # Check Median Text Size (Approximation via middle row)
+            c.execute("SELECT COUNT(*) FROM entities WHERE text_size IS NOT NULL")
+            count_row = c.fetchone()
+            count = count_row[0] if count_row else 0
+            
+            median_text = 0.0
+            if count > 0:
+                offset = count // 2
+                c.execute(f"SELECT text_size FROM entities WHERE text_size IS NOT NULL ORDER BY text_size LIMIT 1 OFFSET {offset}")
+                med_row = c.fetchone()
+                if med_row and med_row[0] is not None:
+                    median_text = float(med_row[0])
+
+            # Heuristic Logic
+            # 1. Median Text > 50: Strong indicator of unit mismatch (mm vs m).
+            # 2. Max Text > 50% of Width: Strong indicator of huge labels.
+            
+            should_scale = False
+            reason = ""
+
+            if robust_w > 0:
+                ratio_max = (max_text * scale_factor) / (robust_w * scale_factor)
+                ratio_med = (median_text * scale_factor) / (robust_w * scale_factor)
+                
+                # Smart Heuristic Logic
+                # We want to distinguish between:
+                # 1. Unit Mismatch (e.g. 3000mm text -> 3m). Scaling is GOOD.
+                # 2. Big Text on Large Map (e.g. 300m text on 30km map). Scaling -> 0.3m (Invisible). Scaling is BAD.
+                # 3. Huge Text on Small Map (e.g. 300m text on 500m map). Scaling -> 0.3m (Tiny but better than covering map). Scaling is NECESSARY.
+                
+                median_val = median_text * scale_factor
+                scaled_median = median_val * 0.001
+                max_val = max_text * scale_factor
+                
+                if robust_w > 0:
+                    ratio_median = median_val / robust_w
+                    ratio_max = max_val / robust_w
+                else:
+                    ratio_median = 0
+                    ratio_max = 0
+                
+                # Only consider scaling if Median Text > 50 (Strong indicator of non-meter units like mm)
+                if median_val > 50:
+                    # Case A: Scaling results in a "Normal" size (>= 0.5m)
+                    # e.g. 5000 -> 5m. 600 -> 0.6m.
+                    # This confirms it was likely mm.
+                    if scaled_median >= 0.5:
+                        should_scale = True
+                        reason = f"Median ({median_val:.2f}) > 50 and Scaled ({scaled_median:.2f}m) is visible (>=0.5m)"
+                    
+                    # Case B: Scaling results in "Tiny" size (< 0.5m), BUT Original is "Huge" (> 10% of map)
+                    # e.g. 300 on 100m map. Ratio 3.0. Scaled 0.3m.
+                    # 0.3m is small, but 300m covers the map. We prefer small.
+                    elif ratio_median > 0.1:
+                        should_scale = True
+                        reason = f"Median ({median_val:.2f}) is Huge relative to map ({ratio_median:.1%}), despite becoming small ({scaled_median:.2f}m)"
+                        
+                    # Case C: Scaling results in "Tiny" size, AND Original is "Acceptable" (< 10% of map)
+                    # e.g. 300 on 30,000m map. Ratio 1%. Scaled 0.3m.
+                    # 300m text is big but readable. 0.3m is invisible.
+                    # We KEEP the original.
+                    else:
+                        should_scale = False
+                        print(f"Text scaling skipped: Median ({median_val:.2f}) would become invisible ({scaled_median:.2f}m) and fits map ({ratio_median:.1%}).")
+                
+                else:
+                    # Median <= 50. Likely Meters.
+                    # However, if Max Text is ABSURDLY huge (e.g. > 80% of map), it's likely an outlier or unit mismatch affecting titles.
+                    # e.g. Map width 100m. Title "System Diagram" is 300 units (300mm -> 0.3m).
+                    # Interpreted as 300m. Covers map 3x.
+                    if ratio_max > 0.8:
+                         should_scale = True
+                         reason = f"Max Text ({max_val:.2f}) covers map ({ratio_max:.1%}) -> Forced Scale"
+                    else:
+                         should_scale = False
+
+                if should_scale:
+                    proposed_scale = scale_factor * 0.001
+                    
+                    # Safeguard: Don't scale if result becomes invisible (< 0.05m = 5cm)
+                    # Unless original was truly huge (> 50m/units) which implies it MUST be scaled
+                    # If text is 80 (mm) -> 0.08m (8cm). OK.
+                    # If text is 20 (m) -> 0.02m (2cm). Too small? 
+                    # But 20m text is huge. If we scale 20 -> 0.02, it disappears.
+                    # If we don't scale 20 -> 20m. It covers map.
+                    # So if text > 50, we assume mm.
+                    # If text < 50, we rely on safeguard.
+                    
+                    # Check if SCALED median text would be at least 1cm (0.01m)
+                    # 10mm text -> 0.01m.
+                    
+                    scaled_max = max_text * proposed_scale
+                    
+                    if scaled_max < 0.01: # < 1cm
+                         print(f"Text scaling skipped: Resulting text too small (Max {scaled_max:.4f}m). Reason: {reason}")
+                    else:
+                         print(f"Detected text unit mismatch. {reason}. Scaling text by 0.001...")
+                         text_scale_factor = proposed_scale
+
+        conn.close()
+    except Exception as e:
+        print(f"Error checking text size: {e}")
+
+    # Get columns to avoid "geom, *" ambiguity and handle text scaling
     cols_str = "*"
     try:
         conn = sqlite3.connect(gpkg_path)
@@ -949,9 +1309,28 @@ def normalize_coordinates(gpkg_path: Path) -> bool:
         c.execute("PRAGMA table_info(entities)")
         cols = [r[1] for r in c.fetchall()]
         conn.close()
-        other_cols = [f'"{col}"' for col in cols if col.lower() not in ('geom', 'geometry')]
-        if other_cols:
-            cols_str = ", ".join(other_cols)
+        
+        other_cols_sql = []
+        for col in cols:
+            if col.lower() in ('geom', 'geometry'): continue
+            if col == 'text_size':
+                if text_scale_factor != 1.0:
+                    other_cols_sql.append(f"text_size * {text_scale_factor} as text_size")
+                else:
+                    other_cols_sql.append(f'"{col}"')
+            elif col == 'line_width' and scale_factor != 1.0:
+                 # line_width is usually in 1/100mm (integer). 
+                 # If we scale geometry, line_width should ideally remain as "print size".
+                 # But if line_width was somehow in ground units, it should scale.
+                 # DXF 370 is strictly 1/100mm. It should NOT be scaled if it represents print width.
+                 # So we keep it as is.
+                 other_cols_sql.append(f'"{col}"')
+            else:
+                other_cols_sql.append(f'"{col}"')
+                
+        if other_cols_sql:
+            cols_str = ", ".join(other_cols_sql)
+            
     except Exception as e:
         print(f"Failed to get columns: {e}")
     
@@ -963,31 +1342,84 @@ def normalize_coordinates(gpkg_path: Path) -> bool:
             try: p.unlink()
             except: pass
 
-    # Step 1: Try Shift + Assign EPSG:3857
-    # Use ST_Translate with Z=0 to support 3D geometries (DXF is often 3D)
-    # We use -dim XY to flatten 3D geometries to 2D for better compatibility
+    # Step 1: Shift to center (0,0) + Handle Scaling
+    # Instead of ST_Scale (which might be missing), we use SRS transformation trick
+    # We define Source SRS with units=mm if needed, and Target SRS with units=m
+    
+    # First, shift to center (0,0)
+    print(f"Shifting geometry by X:{-cx:.2f}, Y:{-cy:.2f} to center at (0,0)")
     sql = f"SELECT ST_Translate(geom, {-cx}, {-cy}, 0) as geom, {cols_str} FROM entities"
     
-    cmd_shift = [
-        settings.ogr2ogr_cmd,
-        "-f", "GPKG",
-        str(temp_shifted),
-        str(gpkg_path),
+    # If scaling is needed, we define a custom SRS for the shifted GPKG
+    # We use a Mercator projection centered at 0,0
+    # If scale_factor is 0.001 (mm), we set units=mm
+    # If scale_factor is 1.0 (m), we set units=m
+    
+    src_proj = "+proj=merc +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+    if scale_factor == 0.001:
+        # Use +to_meter=0.001 to explicitly define units as millimeters
+        # +units=mm might be ignored or not supported in all PROJ versions for Mercator
+        src_proj = "+proj=merc +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +to_meter=0.001 +no_defs"
+    
+    cmd_shift = [settings.ogr2ogr_cmd, "-f", "GPKG"]
+    
+    # Add spatial filter if we have robust bounds to clip outliers
+    # MUST be placed before source/dest in some versions, or at least before -sql depending on driver
+    if stats:
+        # Use formatted strings to ensure valid float representation
+        cmd_shift.extend(["-spat", f"{sx1:.4f}", f"{sy1:.4f}", f"{sx2:.4f}", f"{sy2:.4f}"])
+
+    cmd_shift.extend([
         "-dialect", "SQLite",
         "-sql", sql,
         "-nln", "entities",
-        "-a_srs", "EPSG:3857",
+        "-a_srs", src_proj, # Assign the custom SRS to the shifted data
         "-lco", "GEOMETRY_NAME=geom",
         "-nlt", "GEOMETRY",
-        "-dim", "XY"
-    ]
+        "-dim", "XY",
+        str(temp_shifted),
+        str(gpkg_path)
+    ])
+    
+    print(f"Running normalization command: {' '.join(cmd_shift)}")
     
     ok_shift, out_shift = _run(cmd_shift)
     
+    # Check if shift produced a valid file
+    shift_success = False
+    if ok_shift and temp_shifted.exists():
+        if check_gpkg_count(temp_shifted) > 0:
+            shift_success = True
+        else:
+            print("Normalization (Shift+Filter) resulted in empty GPKG. Retrying without spatial filter...")
+    
+    # Retry without spatial filter if first attempt failed (likely aggressive filtering)
+    if not shift_success and stats:
+        print("Retrying normalization WITHOUT spatial filter...")
+        cmd_shift_retry = [settings.ogr2ogr_cmd, "-f", "GPKG"]
+        cmd_shift_retry.extend([
+            "-dialect", "SQLite",
+            "-sql", sql,
+            "-nln", "entities",
+            "-a_srs", src_proj,
+            "-lco", "GEOMETRY_NAME=geom",
+            "-nlt", "GEOMETRY",
+            "-dim", "XY",
+            str(temp_shifted),
+            str(gpkg_path)
+        ])
+        ok_shift, out_shift = _run(cmd_shift_retry)
+        if ok_shift and temp_shifted.exists() and check_gpkg_count(temp_shifted) > 0:
+            shift_success = True
+        else:
+            print(f"Retry failed: {out_shift}")
+
     result_gpkg = None
     
-    if ok_shift:
-        # Step 2: Reproject to EPSG:4326
+    if shift_success:
+        # Step 2: Reproject to EPSG:4326 (WGS84)
+        # This will automatically handle the unit conversion (mm -> m/degrees)
+        # because temp_shifted has units=mm defined in its SRS
         cmd_proj = [
             settings.ogr2ogr_cmd,
             "-f", "GPKG",

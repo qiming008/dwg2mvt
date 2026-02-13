@@ -160,7 +160,12 @@ const renderMapLayers = () => {
     filter: ['in', '$type', 'LineString', 'Polygon'],
     paint: {
       'line-color': ['coalesce', ['get', 'line_color'], '#2563eb'],
-      'line-width': ['coalesce', ['get', 'line_width'], 2]
+      'line-width': [
+        'case',
+        ['has', 'line_width'],
+        ['/', ['get', 'line_width'], 25], // Convert 1/100mm to ~pixels (25 units = 1px)
+        1 // Default line width if missing
+      ]
     }
   })
 

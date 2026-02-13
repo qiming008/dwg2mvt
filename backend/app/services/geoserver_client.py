@@ -59,7 +59,13 @@ DWG_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                    <PropertyName>fill_color</PropertyName>
                 </ogc:Function>
               </CssParameter>
-              <CssParameter name="fill-opacity">0.3</CssParameter>
+              <CssParameter name="fill-opacity">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>fill_color</PropertyName></ogc:Function>
+                   <ogc:Literal>0.3</ogc:Literal>
+                   <ogc:Literal>1.0</ogc:Literal>
+                </ogc:Function>
+              </CssParameter>
             </Fill>
             <Stroke>
               <CssParameter name="stroke">
@@ -69,7 +75,16 @@ DWG_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                    <PropertyName>line_color</PropertyName>
                 </ogc:Function>
               </CssParameter>
-              <CssParameter name="stroke-width">1</CssParameter>
+              <CssParameter name="stroke-width">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>line_width</PropertyName></ogc:Function>
+                   <ogc:Literal>1</ogc:Literal>
+                   <ogc:Div>
+                       <PropertyName>line_width</PropertyName>
+                       <ogc:Literal>25.0</ogc:Literal>
+                   </ogc:Div>
+                </ogc:Function>
+              </CssParameter>
             </Stroke>
           </PolygonSymbolizer>
         </Rule>
@@ -100,7 +115,16 @@ DWG_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                    <PropertyName>line_color</PropertyName>
                 </ogc:Function>
               </CssParameter>
-              <CssParameter name="stroke-width">1</CssParameter>
+              <CssParameter name="stroke-width">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>line_width</PropertyName></ogc:Function>
+                   <ogc:Literal>1</ogc:Literal>
+                   <ogc:Div>
+                       <PropertyName>line_width</PropertyName>
+                       <ogc:Literal>25.0</ogc:Literal>
+                   </ogc:Div>
+                </ogc:Function>
+              </CssParameter>
             </Stroke>
           </LineSymbolizer>
         </Rule>
@@ -231,8 +255,20 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
           <PolygonSymbolizer>
             <!-- Transparent Fill -->
             <Fill>
-              <CssParameter name="fill">#000000</CssParameter>
-              <CssParameter name="fill-opacity">0.0</CssParameter>
+              <CssParameter name="fill">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>fill_color</PropertyName></ogc:Function>
+                   <ogc:Literal>#000000</ogc:Literal>
+                   <PropertyName>fill_color</PropertyName>
+                </ogc:Function>
+              </CssParameter>
+              <CssParameter name="fill-opacity">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>fill_color</PropertyName></ogc:Function>
+                   <ogc:Literal>0.0</ogc:Literal>
+                   <ogc:Literal>1.0</ogc:Literal>
+                </ogc:Function>
+              </CssParameter>
             </Fill>
             <Stroke>
               <CssParameter name="stroke">
@@ -242,7 +278,16 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                    <PropertyName>line_color</PropertyName>
                 </ogc:Function>
               </CssParameter>
-              <CssParameter name="stroke-width">1</CssParameter>
+              <CssParameter name="stroke-width">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>line_width</PropertyName></ogc:Function>
+                   <ogc:Literal>1</ogc:Literal>
+                   <ogc:Div>
+                       <PropertyName>line_width</PropertyName>
+                       <ogc:Literal>25.0</ogc:Literal>
+                   </ogc:Div>
+                </ogc:Function>
+              </CssParameter>
             </Stroke>
           </PolygonSymbolizer>
         </Rule>
@@ -274,7 +319,16 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                    <PropertyName>line_color</PropertyName>
                 </ogc:Function>
               </CssParameter>
-              <CssParameter name="stroke-width">1</CssParameter>
+              <CssParameter name="stroke-width">
+                <ogc:Function name="if_then_else">
+                   <ogc:Function name="isNull"><PropertyName>line_width</PropertyName></ogc:Function>
+                   <ogc:Literal>1</ogc:Literal>
+                   <ogc:Div>
+                       <PropertyName>line_width</PropertyName>
+                       <ogc:Literal>25.0</ogc:Literal>
+                   </ogc:Div>
+                </ogc:Function>
+              </CssParameter>
             </Stroke>
           </LineSymbolizer>
         </Rule>

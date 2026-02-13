@@ -60,8 +60,9 @@ def process_conversion_task(job_id: str, dwg_path: Path, job_dir: Path, original
 
         # 2. 发布到 GeoServer
         store_name = f"dwg_{job_id}"
-        # Use unique layer name to avoid caching issues
-        layer_name = f"{dwg_path.stem}_{job_id[:8]}"
+        # Use ASCII-only layer name to avoid GeoServer GWC REST API encoding mismatch errors (400)
+        # caused by non-ASCII characters in filenames (e.g. Chinese)
+        layer_name = f"layer_{job_id}"
         
         ok_ws, _ = gs.ensure_workspace()
         if ok_ws:
@@ -126,7 +127,7 @@ def _job_response(job_id: str) -> ConvertResponse:
             message = "Loaded from disk"
             
             # Try to get MVT/WMTS if published
-            layer_name = f"{stem}_{job_id[:8]}"
+            layer_name = f"layer_{job_id}"
             # We assume it might be published if it exists
             # Ideally we'd check GeoServer, but for now:
             mvt_url = gs.get_mvt_url(layer_name)
