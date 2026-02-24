@@ -12,6 +12,13 @@ const mapContainer = ref<HTMLElement | null>(null)
 const map = ref<any>(null)
 const layers = ref<{name: string, color: string}[]>([])
 const selectedLayers = ref<Set<string>>(new Set())
+const isLayerListCollapsed = ref(false)
+watch(isLayerListCollapsed, () => {
+  setTimeout(() => {
+    map.value?.resize()
+  }, 350)
+})
+
 const mapMode = ref<'vector' | 'raster'>('vector')
 
 const toggleMode = () => {
@@ -214,8 +221,8 @@ onMounted(() => {
         }
       ]
     },
-    center: [116.4, 39.9],
-    zoom: 3,
+    // center: [116.4, 39.9], // Don't set initial center to avoid loading unnecessary tiles
+    // zoom: 3,
     localIdeographFontFamily: "'SimSun', 'SimHei', 'sans-serif'"
   })
   
@@ -251,9 +258,7 @@ watch(() => props.result, async (newVal) => {
     }
   }
 
-  // 2. Render Map Layers (Vector or Raster)
-  renderMapLayers()
-  
+  // 2. Fit Bounds First (to prevent loading tiles for wrong location)
   // Note: MVT doesn't provide bounds automatically, so we use the bounds from the conversion result.
   console.log('Conversion result bounds:', newVal.bbox)
   if (newVal.bbox) {
@@ -266,7 +271,8 @@ watch(() => props.result, async (newVal) => {
         isValidLat(minY) && isValidLat(maxY)) {
       console.log('Fitting bounds:', newVal.bbox)
       try {
-        map.value.fitBounds(newVal.bbox as [number, number, number, number], { padding: 50 })
+        // Use animate: false to jump immediately before loading layers
+        map.value.fitBounds(newVal.bbox as [number, number, number, number], { padding: 50, animate: false })
       } catch (e) {
         console.error('Error fitting bounds:', e)
       }
@@ -274,25 +280,33 @@ watch(() => props.result, async (newVal) => {
       console.warn('Invalid bounds detected, skipping fitBounds:', newVal.bbox)
     }
   }
+
+  // 3. Render Map Layers (Vector or Raster)
+  renderMapLayers()
 })
 </script>
 
 <template>
   <div class="map-wrapper">
-    <div class="sidebar" v-if="layers.length > 0 && mapMode === 'vector'">
-      <div class="sidebar-header">
-        <h3>图层列表</h3>
-        <label class="select-all">
-          <input type="checkbox" :checked="selectedLayers.size === layers.length" @change="toggleAllLayers" />
-          全选
-        </label>
+    <div class="sidebar" :class="{ 'is-collapsed': isLayerListCollapsed }" v-if="layers.length > 0 && mapMode === 'vector'">
+      <div class="sidebar-toggle" @click="isLayerListCollapsed = !isLayerListCollapsed" :title="isLayerListCollapsed ? '展开图层列表' : '收起图层列表'">
+        {{ isLayerListCollapsed ? '▶' : '◀' }}
       </div>
-      <div class="layer-list">
-        <label v-for="layer in layers" :key="layer.name" class="layer-item">
-          <input type="checkbox" :checked="selectedLayers.has(layer.name)" @change="toggleLayer(layer.name)" />
-          <span class="layer-color-box" :style="{ backgroundColor: layer.color }"></span>
-          <span class="layer-name" :title="layer.name">{{ layer.name }}</span>
-        </label>
+      <div class="sidebar-content" v-show="!isLayerListCollapsed">
+        <div class="sidebar-header">
+          <h3>图层列表</h3>
+          <label class="select-all">
+            <input type="checkbox" :checked="selectedLayers.size === layers.length" @change="toggleAllLayers" />
+            全选
+          </label>
+        </div>
+        <div class="layer-list">
+          <label v-for="layer in layers" :key="layer.name" class="layer-item">
+            <input type="checkbox" :checked="selectedLayers.has(layer.name)" @change="toggleLayer(layer.name)" />
+            <span class="layer-color-box" :style="{ backgroundColor: layer.color }"></span>
+            <span class="layer-name" :title="layer.name">{{ layer.name }}</span>
+          </label>
+        </div>
       </div>
     </div>
     <div ref="mapContainer" class="map-container">
@@ -320,9 +334,42 @@ watch(() => props.result, async (newVal) => {
   background: #3b4453;
   border-right: 1px solid #2d3239;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   z-index: 10;
   box-shadow: 2px 0 5px rgba(0,0,0,0.2);
+  transition: width 0.3s ease;
+}
+
+.sidebar.is-collapsed {
+  width: 24px;
+}
+
+.sidebar-toggle {
+  width: 24px;
+  height: 100%;
+  background: #23272e;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-right: 1px solid #1f2937;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.sidebar-toggle:hover {
+  background: #374151;
+  color: #fff;
+}
+
+.sidebar-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  height: 100%;
 }
 
 .sidebar-header {
@@ -367,9 +414,9 @@ watch(() => props.result, async (newVal) => {
 }
 
 .layer-color-box {
-  width: 12px;
-  height: 12px;
-  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   flex-shrink: 0;
   border: 1px solid rgba(255,255,255,0.2);
 }
