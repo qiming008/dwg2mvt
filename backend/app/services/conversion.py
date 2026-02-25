@@ -229,6 +229,18 @@ def parse_dxf_layers(dxf_path: Path) -> dict[str, str]:
                             layers[current_layer] = ACI_HEX[color_idx]
                     except:
                         pass
+                        
+                # Check 420 (True Color) - Overrides ACI
+                if line == "420" and i+1 < len(lines) and current_layer:
+                    try:
+                        val = int(lines[i+1].strip())
+                        r = (val >> 16) & 0xFF
+                        g = (val >> 8) & 0xFF
+                        b = val & 0xFF
+                        hex_color = f"#{r:02X}{g:02X}{b:02X}"
+                        layers[current_layer] = hex_color
+                    except:
+                        pass
     except Exception as e:
         print(f"Layer parsing failed: {e}")
     return layers
@@ -259,11 +271,24 @@ def extract_dxf_attributes(dxf_path: Path) -> dict[str, dict]:
             def process_entity(type_, attrs):
                 data = {'type': type_}
                 
-                # 1. Color (Group 62)
+                # 1. Color (Group 62 & 420)
                 # If missing, it's ByLayer (256), which we skip (handled by layer logic)
                 # If 0, it's ByBlock
                 color_hex = None
-                if '62' in attrs:
+                
+                # Check True Color (420) first
+                if '420' in attrs:
+                    try:
+                        val = int(attrs['420'])
+                        r = (val >> 16) & 0xFF
+                        g = (val >> 8) & 0xFF
+                        b = val & 0xFF
+                        color_hex = f"#{r:02X}{g:02X}{b:02X}"
+                        data['c'] = color_hex
+                    except: pass
+                
+                # Fallback to ACI (62) if no True Color
+                if not color_hex and '62' in attrs:
                     try:
                         c_idx = int(attrs['62'])
                         if c_idx < 0: c_idx = -c_idx # Layer off but color persists
@@ -367,18 +392,41 @@ def extract_dxf_attributes(dxf_path: Path) -> dict[str, dict]:
                         data['dx'] = off_x
                         data['dy'] = off_y
                         
+                # 5. Text Content (Full Extraction)
+                if 'txt' in attrs:
+                    # DXF stores MTEXT in chunks: Group 3 (multiple) followed by Group 1.
+                    # We just concatenate all found strings in order of appearance.
+                    # Since we read sequentially, this should be correct if DXF is well-formed.
+                    full_text = "".join(attrs['txt'])
+                    if full_text:
+                        data['t'] = full_text
+
+                # 6. Layer Name (Group 8)
+                if '8' in attrs:
+                    data['layer'] = attrs['8']
+
                 return data
 
             try:
-                while True:
-                    code = next(iterator).strip()
-                    value = next(iterator).strip()
+                # We need to track current handle and type
+                current_handle = None
+                current_type = None
+                attrs = {}
+                
+                for line in iterator:
+                    code = line.strip()
+                    try:
+                        value = next(iterator).strip()
+                    except StopIteration:
+                        break
                     
                     if code == '0':
+                        # End of previous entity
                         if current_handle:
+                            # Use helper
                             res = process_entity(current_type, attrs)
                             if res: results[current_handle] = res
-                        
+
                         current_type = value
                         current_handle = None
                         attrs = {}
@@ -388,10 +436,19 @@ def extract_dxf_attributes(dxf_path: Path) -> dict[str, dict]:
                             
                     elif code == '5':
                         current_handle = value
+                    elif code == '8':
+                        # Layer Name
+                        attrs['8'] = value
+                    elif code in ('1', '3'):
+                        # Text Content (1=Primary, 3=Additional chunks for MTEXT > 250 chars)
+                        # We accumulate them in order. DXF standard: 3 comes before 1.
+                        # But some implementations might vary. We'll store list.
+                        if 'txt' not in attrs: attrs['txt'] = []
+                        attrs['txt'].append(value)
                     elif code in ('10', '20', '11', '21', '40', '50'):
                         try: attrs[code] = float(value) # Keep as float for coords/angles
                         except: pass
-                    elif code in ('62', '71', '72', '73', '370'):
+                    elif code in ('62', '71', '72', '73', '370', '420'):
                         try: attrs[code] = int(value) # Keep as int for enums
                         except: pass
                         
@@ -533,8 +590,18 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
     ok, err = _run(cmd_gpkg, cwd=output_dir, timeout=3600)
     
     # Check if we got entities
-    if ok and check_gpkg_count(gpkg_path) == 0:
-         print("Initial conversion resulted in 0 entities. Retrying without inline blocks...")
+    count = check_gpkg_count(gpkg_path)
+    # Threshold increased to 500 to catch cases where only few entities (like border) are converted
+    # but the main content (in blocks) is missing.
+    if ok and count < 500:
+         print(f"Initial conversion resulted in only {count} entities. Retrying without inline blocks...")
+         
+         # Backup original GPKG just in case retry is worse
+         gpkg_backup = gpkg_path.with_suffix(".gpkg.bak")
+         try:
+             shutil.copy2(gpkg_path, gpkg_backup)
+         except: pass
+
          # Retry with DXF_INLINE_BLOCKS=FALSE (sometimes better for messy blocks)
          cmd_retry = list(cmd_gpkg)
          # Find and replace config
@@ -542,7 +609,26 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
              if arg == "DXF_INLINE_BLOCKS":
                  cmd_retry[i+1] = "FALSE"
          
-         ok, err = _run(cmd_retry, cwd=output_dir, timeout=3600)
+         ok_retry, err_retry = _run(cmd_retry, cwd=output_dir, timeout=3600)
+         
+         # Compare results
+         count_retry = check_gpkg_count(gpkg_path)
+         print(f"Retry result: {count_retry} entities")
+         
+         if not ok_retry or count_retry <= count:
+             print("Retry was worse or failed, reverting to original...")
+             try:
+                 if gpkg_backup.exists():
+                     shutil.move(gpkg_backup, gpkg_path)
+             except: pass
+         else:
+             # Retry was better, keep it
+             # Clean backup
+             if gpkg_backup.exists():
+                 try: gpkg_backup.unlink()
+                 except: pass
+             ok = ok_retry
+             err = err_retry
 
     # DEBUG: Log result
     try:
@@ -608,6 +694,11 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
         # 7. Parse DXF Attributes (Alignments, Rotation, Color, Width)
         if progress_callback: progress_callback(70, "正在解析实体属性(对齐/旋转/颜色/线宽)...")
         try:
+            # First, parse Layer Colors to handle ByLayer entities
+            layer_colors = parse_dxf_layers(dxf_path)
+            if not layer_colors:
+                print("Warning: No layer colors found")
+            
             attrs_map = extract_dxf_attributes(dxf_path)
             if attrs_map:
                 # Prepare data
@@ -637,9 +728,15 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                     if 'r' in v:
                         rotations.append((v['r'], k))
                         
-                    # Colors
+                    # Colors (Explicit > ByLayer)
+                    color = None
                     if 'c' in v:
                         color = v['c']
+                    elif 'layer' in v and v['layer'] in layer_colors:
+                        # Use Layer Color if Entity Color is missing (ByLayer)
+                        color = layer_colors[v['layer']]
+                        
+                    if color:
                         if color == "#000000": color = "#FFFFFF"
                         
                         if v['type'] in ('TEXT', 'MTEXT'):
@@ -648,13 +745,17 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                             line_colors.append((color, k))
                             
                     # Fill Colors (Hatch/Solid)
+                    fill = None
                     if 'fill' in v:
                         fill = v['fill']
+                    elif v['type'] in ('HATCH', 'SOLID', 'TRACE') and color:
+                        # Use line color (explicit or layer) as fill if explicit fill is missing
+                        fill = color
+                        
+                    if fill:
                         # Handle colors for Black Background (Dark Mode)
-                        # If fill is black (#000000), convert to white (#FFFFFF) to be visible
                         if fill == "#000000": 
                             fill = "#FFFFFF"
-                        # If fill is white (#FFFFFF), keep it white
                         elif fill == "#FFFFFF":
                             pass
                              
@@ -772,10 +873,78 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
                         c.executemany("UPDATE entities SET line_width=? WHERE EntityHandle=?", line_widths)
                     except Exception as e:
                         print(f"Line width update error: {e}")
+                
+                # Update Full Text (New - Fix truncation issues)
+                # We collect full text from DXF (Group 3 + Group 1) and overwrite the potentially truncated text in GPKG
+                full_texts = []
+                for h, d in attrs.items():
+                    if 't' in d:
+                        full_texts.append((d['t'], h))
+                
+                if full_texts:
+                    try:
+                        if 'Text' in cols:
+                            c.executemany("UPDATE entities SET Text=? WHERE EntityHandle=?", full_texts)
+                        if 'text_content' in cols:
+                             c.executemany("UPDATE entities SET text_content=? WHERE EntityHandle=?", full_texts)
+                    except Exception as e:
+                        print(f"Full text update error: {e}")
 
         except Exception as e:
             print(f"Attribute parsing warning: {e}")
             
+        # 8. Decode Multibyte Text (MIF \M+nXXXX)
+        # This handles cases where GDAL/LibreDWG didn't decode the specific codepage (e.g. GBK \M+5xxxx)
+        if 'Text' in cols:
+             if progress_callback: progress_callback(75, "正在解码特殊字符...")
+             try:
+                 c.execute("SELECT rowid, Text FROM entities WHERE Text LIKE '%\\M+%' ESCAPE '!'")
+                 rows = c.fetchall()
+                 if rows:
+                     print(f"Found {len(rows)} entities with potential encoded text")
+                     updates = []
+                     import re
+                     # Regex for \M+nXXXX (n=digit, XXXX=hex)
+                     pattern = re.compile(r'\\M\+([0-9])([0-9A-Fa-f]{4})', re.IGNORECASE)
+                     
+                     codepages = {
+                        '1': 'cp1252', # ANSI
+                        '2': 'cp932',  # Shift-JIS
+                        '3': 'cp949',  # Hangul
+                        '5': 'gbk',    # GBK (CP936)
+                        '7': 'big5'    # Big5
+                     }
+
+                     def replace_match_wrapper(match):
+                        cp_digit = match.group(1)
+                        hex_str = match.group(2)
+                        # Default to GBK (5) if unknown
+                        enc_name = codepages.get(cp_digit, 'gbk')
+                        try:
+                            # Convert hex string (4 chars) to bytes (2 bytes)
+                            byte_data = bytes.fromhex(hex_str)
+                            return byte_data.decode(enc_name)
+                        except Exception:
+                            return match.group(0)
+
+                     for rid, txt in rows:
+                         if not txt: continue
+                         try:
+                             new_txt = pattern.sub(replace_match_wrapper, txt)
+                             if new_txt != txt:
+                                 updates.append((new_txt, rid))
+                         except Exception: pass
+                     
+                     if updates:
+                         print(f"Decoded {len(updates)} text entities")
+                         c.executemany("UPDATE entities SET Text=? WHERE rowid=?", updates)
+                         # Also update text_content if it exists
+                         if 'text_content' in cols:
+                             c.executemany("UPDATE entities SET text_content=? WHERE rowid=?", updates)
+                             
+             except Exception as e:
+                 print(f"Text decoding error: {e}")
+
         # Remove text from Hatch entities (often pattern names like SOLID, HONEY)
         # We do this early to ensure it runs even if later steps fail
         if 'Text' in cols:
@@ -936,14 +1105,14 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
         print(f"Post-processing error: {e}")
     
     # Sanitize coordinates (remove garbage)
-    if progress_callback: progress_callback(85, "Sanitizing coordinates...")
+    if progress_callback: progress_callback(85, "正在清理坐标...")
     try:
         sanitize_coordinates(gpkg_path)
     except Exception as e:
         print(f"Sanitization warning: {e}")
 
     # Normalize coordinates
-    if progress_callback: progress_callback(90, "Normalizing coordinates...")
+    if progress_callback: progress_callback(90, "正在归一化坐标...")
     try:
         normalize_coordinates(gpkg_path)
     except Exception as e:
@@ -952,12 +1121,12 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
     # Force Repack GPKG to fix Spatial Index (RTree) after direct SQLite modifications
     # This ensures GeoServer can properly query the data
     try:
-        if progress_callback: progress_callback(95, "Repacking GeoPackage...")
+        if progress_callback: progress_callback(95, "正在重新打包GeoPackage...")
         repack_gpkg(gpkg_path)
     except Exception as e:
         print(f"Repack warning: {e}")
 
-    if progress_callback: progress_callback(100, "Done")
+    if progress_callback: progress_callback(100, "转换完成")
     return True, gpkg_path, ""
 
 def check_gpkg_count(gpkg_path: Path) -> int:
@@ -1361,6 +1530,9 @@ def normalize_coordinates(gpkg_path: Path) -> bool:
         # +units=mm might be ignored or not supported in all PROJ versions for Mercator
         src_proj = "+proj=merc +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +to_meter=0.001 +no_defs"
     
+    # Get original count for comparison
+    original_count = check_gpkg_count(gpkg_path)
+
     cmd_shift = [settings.ogr2ogr_cmd, "-f", "GPKG"]
     
     # Add spatial filter if we have robust bounds to clip outliers
@@ -1388,12 +1560,18 @@ def normalize_coordinates(gpkg_path: Path) -> bool:
     # Check if shift produced a valid file
     shift_success = False
     if ok_shift and temp_shifted.exists():
-        if check_gpkg_count(temp_shifted) > 0:
+        filtered_count = check_gpkg_count(temp_shifted)
+        
+        # Check if we lost too many entities due to spatial filtering
+        # If we kept < 20% of entities AND kept < 2000 entities, assume filtering was too aggressive
+        ratio = filtered_count / original_count if original_count > 0 else 0
+        
+        if filtered_count > 0 and (ratio > 0.2 or filtered_count > 2000):
             shift_success = True
         else:
-            print("Normalization (Shift+Filter) resulted in empty GPKG. Retrying without spatial filter...")
+            print(f"Normalization (Shift+Filter) kept only {filtered_count}/{original_count} entities ({ratio:.1%}). Retrying without spatial filter...")
     
-    # Retry without spatial filter if first attempt failed (likely aggressive filtering)
+    # Retry without spatial filter if first attempt failed or was too aggressive
     if not shift_success and stats:
         print("Retrying normalization WITHOUT spatial filter...")
         cmd_shift_retry = [settings.ogr2ogr_cmd, "-f", "GPKG"]

@@ -155,10 +155,10 @@ DWG_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
               <CssParameter name="font-size">
                 <ogc:Function name="if_then_else">
                    <ogc:Function name="isNull"><PropertyName>text_size</PropertyName></ogc:Function>
-                   <ogc:Literal>12</ogc:Literal>
+                   <ogc:Literal>2.5</ogc:Literal> <!-- Default to 2.5m Ground Units -->
                    <ogc:Function name="if_then_else">
-                       <ogc:Function name="lessThan"><PropertyName>text_size</PropertyName><ogc:Literal>0.1</ogc:Literal></ogc:Function>
-                       <ogc:Literal>0.1</ogc:Literal>
+                       <ogc:Function name="lessThan"><PropertyName>text_size</PropertyName><ogc:Literal>0.001</ogc:Literal></ogc:Function>
+                       <ogc:Literal>0.001</ogc:Literal>
                        <PropertyName>text_size</PropertyName>
                    </ogc:Function>
                 </ogc:Function>
@@ -341,7 +341,7 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
                   <PropertyName>Text</PropertyName>
                   <Literal></Literal>
                </PropertyIsNotEqualTo>
-               <Not><PropertyIsNull><PropertyName>text_size</PropertyName></PropertyIsNull></Not>
+               <!-- Removed check for null text_size to enforce Ground Units always -->
              </And>
           </Filter>
           <TextSymbolizer uom="http://www.opengeospatial.org/se/units/metre">
@@ -363,7 +363,7 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
               <CssParameter name="font-size">
                 <ogc:Function name="if_then_else">
                    <ogc:Function name="isNull"><PropertyName>text_size</PropertyName></ogc:Function>
-                   <ogc:Literal>1.0</ogc:Literal>
+                   <ogc:Literal>2.5</ogc:Literal> <!-- Default to 2.5m Ground Units -->
                    <ogc:Function name="if_then_else">
                        <ogc:Function name="lessThan"><PropertyName>text_size</PropertyName><ogc:Literal>0.001</ogc:Literal></ogc:Function>
                        <ogc:Literal>0.001</ogc:Literal>
@@ -422,84 +422,6 @@ DWG_RASTER_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
             <VendorOption name="partials">true</VendorOption>
             <VendorOption name="conflictResolution">false</VendorOption>
             <VendorOption name="spaceAround">-1</VendorOption>
-          </TextSymbolizer>
-        </Rule>
-
-        <!-- Text default (Screen Units) -->
-        <Rule>
-          <Name>Text_Screen</Name>
-          <Filter>
-             <And>
-               <PropertyIsNotEqualTo>
-                  <PropertyName>Text</PropertyName>
-                  <Literal></Literal>
-               </PropertyIsNotEqualTo>
-               <PropertyIsNull><PropertyName>text_size</PropertyName></PropertyIsNull>
-             </And>
-          </Filter>
-          <TextSymbolizer>
-            <Label>
-              <ogc:Function name="if_then_else">
-                 <ogc:Function name="isNull"><PropertyName>text_content</PropertyName></ogc:Function>
-                 <PropertyName>Text</PropertyName>
-                 <PropertyName>text_content</PropertyName>
-              </ogc:Function>
-            </Label>
-            <Font>
-              <CssParameter name="font-family">SimSun, Microsoft YaHei, Arial, sans-serif</CssParameter>
-              <CssParameter name="font-size">12</CssParameter>
-              <CssParameter name="font-style">normal</CssParameter>
-              <CssParameter name="font-weight">normal</CssParameter>
-            </Font>
-            <LabelPlacement>
-              <PointPlacement>
-                <AnchorPoint>
-                  <AnchorPointX>
-                    <ogc:Function name="if_then_else">
-                       <ogc:Function name="isNull"><PropertyName>anchor_x</PropertyName></ogc:Function>
-                       <ogc:Literal>0.0</ogc:Literal>
-                       <PropertyName>anchor_x</PropertyName>
-                    </ogc:Function>
-                  </AnchorPointX>
-                  <AnchorPointY>
-                    <ogc:Function name="if_then_else">
-                       <ogc:Function name="isNull"><PropertyName>anchor_y</PropertyName></ogc:Function>
-                       <ogc:Literal>0.0</ogc:Literal>
-                       <PropertyName>anchor_y</PropertyName>
-                    </ogc:Function>
-                  </AnchorPointY>
-                </AnchorPoint>
-                <Rotation>
-                   <ogc:Function name="if_then_else">
-                      <ogc:Function name="isNull"><PropertyName>text_angle</PropertyName></ogc:Function>
-                      <ogc:Function name="if_then_else">
-                          <ogc:Function name="isNull"><PropertyName>rotation</PropertyName></ogc:Function>
-                          <ogc:Literal>0.0</ogc:Literal>
-                          <PropertyName>rotation</PropertyName>
-                      </ogc:Function>
-                      <PropertyName>text_angle</PropertyName>
-                   </ogc:Function>
-                </Rotation>
-              </PointPlacement>
-            </LabelPlacement>
-            <Fill>
-              <CssParameter name="fill">
-                <ogc:Function name="if_then_else">
-                   <ogc:Function name="isNull"><PropertyName>text_color</PropertyName></ogc:Function>
-                   <ogc:Function name="if_then_else">
-                       <ogc:Function name="isNull"><PropertyName>line_color</PropertyName></ogc:Function>
-                       <ogc:Literal>#FFFFFF</ogc:Literal>
-                       <PropertyName>line_color</PropertyName>
-                   </ogc:Function>
-                   <PropertyName>text_color</PropertyName>
-                </ogc:Function>
-              </CssParameter>
-            </Fill>
-            <VendorOption name="maxDisplacement">400</VendorOption>
-            <VendorOption name="partials">true</VendorOption>
-            <VendorOption name="conflictResolution">false</VendorOption>
-            <VendorOption name="spaceAround">-1</VendorOption>
-            <VendorOption name="goodnessOfFit">0.1</VendorOption>
           </TextSymbolizer>
         </Rule>
       </FeatureTypeStyle>
@@ -654,7 +576,9 @@ def enable_gwc_mvt(layer_name: str) -> tuple[bool, str]:
         ET.SubElement(spf, "defaultValue")
         values = ET.SubElement(spf, "values")
         ET.SubElement(values, "string") # Empty string
-        ET.SubElement(values, "string").text = full_style_name
+        # Ensure BOTH styles are available in the GWC filter
+        ET.SubElement(values, "string").text = f"{ws}:dwg_generic_style"
+        ET.SubElement(values, "string").text = f"{ws}:dwg_raster_style"
         
         xml_body = ET.tostring(root, encoding="unicode")
 
