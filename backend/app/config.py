@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     # GDAL ogr2ogr（系统 PATH）
     ogr2ogr_cmd: str = str(Path(__file__).resolve().parent.parent / "tools" / "gdal" / "bin" / "gdal" / "apps" / "ogr2ogr.exe")
     # 输出坐标系（Web 地图常用）
-    target_srs: str = "EPSG:3857"
+    target_srs: str = "EPSG:4326"  # 改为 WGS84 经纬度
+    # 高斯 - 克吕格投影配置（用于 DWG 原始坐标转经纬度）
+    # 投影带号（1-60），根据经度确定：带号 = int(经度/6) + 31 (6 度带) 或 int(经度/3) + 1 (3 度带)
+    gauss_kruger_zone: int | None = None  # 如果不设置，尝试自动检测
+    # 是否启用高斯 - 克吕格到 WGS84 的转换
+    enable_gauss_kruger_transform: bool = True
     # GeoServer
     geoserver_url: str = "http://localhost:8080/geoserver"
     geoserver_user: str = "admin"

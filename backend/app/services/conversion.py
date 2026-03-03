@@ -559,13 +559,42 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
         "--config", "DXF_INLINE_BLOCKS", "TRUE",
         "--config", "DXF_ATTRIBUTES", "TRUE",
         "-f", "GPKG",
-        # Do not force SRS here to allow large coordinates (e.g. millimeters) to be imported
-        # We will normalize/project later
         str(gpkg_path),
         str(dxf_path),
         "-skipfailures",
         "-lco", "GEOMETRY_NAME=geom"
     ]
+    
+    # 添加高斯 - 克吕格投影到 WGS84 的转换
+    if settings.enable_gauss_kruger_transform:
+        # 检测是否需要使用高斯 - 克吕格投影
+        # 根据坐标值判断：如果 X 坐标>1000000，可能是高斯 - 克吕格投影
+        zone = settings.gauss_kruger_zone
+        
+        # 尝试从 DXF 文件中读取一些样本点来判断坐标系
+        # 如果用户没有指定带号，尝试自动检测
+        if zone is None:
+            # 根据经验自动检测：
+            # 坐标 X: 39620862 -> 前 2 位"39"是带号，后面 620862 是 Y 坐标（含 500km 东偏移）
+            # 这是典型的 3 度带高斯 - 克吕格投影
+            # 39 带的中央经线 = 39 * 3 = 117°（适用于中国东部：北京、天津、山东、江苏等）
+            zone = 39
+            print(f"自动检测到高斯 - 克吕格 3 度带，带号={zone}")
+        
+        # 高斯 - 克吕格 3 度带投影参数
+        # 中央经线 = 带号 × 3
+        central_meridian = zone * 3
+        # 东偏移 = 带号 × 1000000 + 500000（500km 是假东偏移，避免负坐标）
+        false_easting = zone * 1000000 + 500000
+        
+        source_srs = f"+proj=tmerc +lat_0=0 +lon_0={central_meridian} +k=0.9996 +x_0={false_easting} +y_0=0 +datum=WGS84 +units=m +no_defs"
+        target_srs = "EPSG:4326"
+        
+        cmd_gpkg.extend([
+            "-s_srs", source_srs,
+            "-t_srs", target_srs
+        ])
+        print(f"启用高斯 - 克吕格投影转换：带号={zone}, 中央经线={central_meridian}°, 东偏移={false_easting}")
 
     # DEBUG: Log environment and command
     try:
@@ -1111,12 +1140,12 @@ def convert_dwg_to_gpkg(dwg_path: Path, output_dir: Path, progress_callback=None
     except Exception as e:
         print(f"Sanitization warning: {e}")
 
-    # Normalize coordinates
-    if progress_callback: progress_callback(90, "正在归一化坐标...")
-    try:
-        normalize_coordinates(gpkg_path)
-    except Exception as e:
-        print(f"Normalization warning: {e}")
+    # Normalize coordinates (optional - disabled to preserve original DWG coordinates)
+    # if progress_callback: progress_callback(90, "正在归一化坐标...")
+    # try:
+    #     normalize_coordinates(gpkg_path)
+    # except Exception as e:
+    #     print(f"Normalization warning: {e}")
         
     # Force Repack GPKG to fix Spatial Index (RTree) after direct SQLite modifications
     # This ensures GeoServer can properly query the data

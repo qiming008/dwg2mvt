@@ -13,6 +13,7 @@ const map = ref<any>(null)
 const layers = ref<{name: string, color: string}[]>([])
 const selectedLayers = ref<Set<string>>(new Set())
 const isLayerListCollapsed = ref(false)
+const mouseCoords = ref<[number, number] | null>(null)
 watch(isLayerListCollapsed, () => {
   setTimeout(() => {
     map.value?.resize()
@@ -227,6 +228,17 @@ onMounted(() => {
   })
   
   ;(map.value as any).addControl(new maplibregl.NavigationControl())
+  
+  // Add mouse move event listener to track coordinates
+  map.value.on('mousemove', (e: any) => {
+    const lng = e.lngLat.lng
+    const lat = e.lngLat.lat
+    mouseCoords.value = [lng, lat]
+  })
+  
+  map.value.on('mouseleave', () => {
+    mouseCoords.value = null
+  })
 })
 
 onUnmounted(() => {
@@ -316,6 +328,9 @@ watch(() => props.result, async (newVal) => {
        <button class="reset-btn" @click="resetView" v-if="result">
          重置视角
        </button>
+       <div class="coords-display" v-if="mouseCoords">
+         经度：{{ mouseCoords[0].toFixed(6) }}, 纬度：{{ mouseCoords[1].toFixed(6) }}
+       </div>
     </div>
   </div>
 </template>
@@ -458,6 +473,22 @@ watch(() => props.result, async (newVal) => {
 
 .reset-btn:hover {
   background-color: #2563eb;
+}
+
+.coords-display {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  z-index: 10;
+  background-color: rgba(30, 41, 59, 0.85);
+  color: #e5e7eb;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  pointer-events: none;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .layer-name {
