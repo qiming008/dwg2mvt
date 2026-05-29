@@ -29,3 +29,7 @@ backend/tools/
 *.dxf
 .env
 .env*.local
+
+# Large archives
+*.tar.gz
+*.tar
