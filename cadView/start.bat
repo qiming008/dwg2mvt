@@ -3,9 +3,11 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 
 echo ========================================
-echo   LibreDWG Frontend Launcher
+echo   cadView Microapp Dev Launcher
 echo ========================================
 echo.
+
+cd /d "%~dp0"
 
 rem Check Node.js
 node --version >nul 2>&1
@@ -41,8 +43,8 @@ if not exist "node_modules" (
 echo [2/3] Starting frontend dev server...
 echo.
 echo ========================================
-echo   Frontend: http://localhost:5173
-echo   Backend:  http://localhost:8088
+echo   cadView:   http://localhost:3666
+echo   Backend:   http://localhost:8088
 echo   GeoServer: http://localhost:19080
 echo   Press Ctrl+C to stop
 echo ========================================

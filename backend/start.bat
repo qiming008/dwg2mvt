@@ -65,7 +65,7 @@ echo Dependencies OK.
 echo.
 
 echo [6] Starting Uvicorn...
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
+uvicorn app.main:app --reload --reload-dir app --host 0.0.0.0 --port 8088
 
 echo.
 echo Service stopped normally.

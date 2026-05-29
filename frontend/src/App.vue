@@ -1,7 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import Uploader from './components/Uploader.vue'
 import Map from './components/Map.vue'
+import { API_BASE } from './config'
 import type { ConvertResult } from './types'
 
 interface Job {
@@ -18,7 +19,7 @@ const selectedJobId = ref<string>('')
 
 const fetchJobs = async () => {
   try {
-    const res = await fetch('/api/jobs')
+    const res = await fetch(`${API_BASE}/jobs`)
     if (res.ok) {
       jobs.value = await res.json()
     }
@@ -30,7 +31,7 @@ const fetchJobs = async () => {
 const loadJob = async (jobId: string) => {
   if (!jobId) return
   try {
-    const res = await fetch(`/api/convert/${jobId}`)
+    const res = await fetch(`${API_BASE}/convert/${jobId}`)
     if (res.ok) {
       const data = await res.json()
       result.value = data
@@ -66,10 +67,10 @@ onMounted(() => {
 <template>
   <header class="app-header">
     <div class="header-top">
-      <h1 class="app-title">DWG 转切片</h1>
+      <h1 class="app-title">DWG / DXF 转切片</h1>
       <div class="header-actions">
         <Uploader
-          api-base="/api"
+          :api-base="API_BASE"
           @convert="onConvert"
           @error="onError"
         />
@@ -94,7 +95,7 @@ onMounted(() => {
     <Map :result="result" />
     <div v-if="result && !result.mvt_url && result.status === 'done'" class="app-hint">
       转换完成。GeoServer 未返回 MVT 地址时可
-      <a :href="`/api/convert/${result.job_id}/gpkg`" download style="margin-left: 4px">下载 GPKG</a>
+      <a :href="`${API_BASE}/convert/${result.job_id}/gpkg`" download style="margin-left: 4px">下载 GPKG</a>
       在 QGIS 等工具中查看，或配置 GeoServer 后重新发布。
     </div>
   </main>

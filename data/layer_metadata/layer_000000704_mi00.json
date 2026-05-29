@@ -1,0 +1,44 @@
+[
+  {
+    "name": "0",
+    "visible": true,
+    "kind": "text",
+    "lineColor": "#FFFFFF",
+    "textColor": "#FFFFFF"
+  },
+  {
+    "name": "七号煤",
+    "visible": false,
+    "kind": "both",
+    "lineColor": "#FF00FF",
+    "textColor": "#FF00FF"
+  },
+  {
+    "name": "九号煤",
+    "visible": true,
+    "kind": "both",
+    "lineColor": "#FFFFFF",
+    "textColor": "#FFFFFF"
+  },
+  {
+    "name": "尺寸标注",
+    "visible": true,
+    "kind": "line",
+    "lineColor": "#FFFFFF",
+    "textColor": "#FFFFFF"
+  },
+  {
+    "name": "标注",
+    "visible": true,
+    "kind": "line",
+    "lineColor": "#FFFFFF",
+    "textColor": "#FFFFFF"
+  },
+  {
+    "name": "等高线",
+    "visible": true,
+    "kind": "line",
+    "lineColor": "#FF3F00",
+    "textColor": "#FF3F00"
+  }
+]

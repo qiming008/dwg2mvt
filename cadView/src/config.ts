@@ -6,3 +6,5 @@ export const GEOSERVER_BASE = import.meta.env.VITE_GEOSERVER_BASE || '/csrap_geo
 
 export const GEOSERVER_PUBLIC_BASE =
   import.meta.env.VITE_GEOSERVER_PUBLIC_BASE || GEOSERVER_BASE
+
+export const TILE_PUBLIC_ORIGIN = import.meta.env.VITE_TILE_PUBLIC_ORIGIN || ''

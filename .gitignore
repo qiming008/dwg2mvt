@@ -28,3 +28,4 @@ backend/tools/
 *.dwg
 *.dxf
 .env
+.env*.local

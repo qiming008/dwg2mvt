@@ -1,19 +1,87 @@
-# 可选：仅启动 GeoServer，供后端发布 MVT 使用
-# 后端与前端需在宿主机安装 LibreDWG、GDAL 后本地运行
-version: "3.9"
 services:
-  geoserver:
-    image: docker.io/geoserver/geoserver:2.25
+  frontend:
+    build:
+      context: ./frontend
+    image: libredwg-frontend:latest
     ports:
-      - "8080:8080"
+      - "19001:80"
+    depends_on:
+      - backend
+      - csrap_geoserver
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: libredwg-backend:latest
+    entrypoint:
+      - python3
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --loop
+      - asyncio
+      - --http
+      - h11
+    ports:
+      - "19010:8000"
+    environment:
+      APP_WORK_DIR: /app/backend/data
+      APP_DWG2DXF_CMD: dwg2dxf
+      APP_DWG2SVG_CMD: dwg2SVG
+      APP_ORIGINAL_PREVIEW_TIMEOUT_SECONDS: "300"
+      APP_ORIGINAL_PREVIEW_TEMP_DIR: /tmp/libredwg_original_preview
+      APP_OGR2OGR_CMD: ogr2ogr
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      APP_GEOSERVER_URL: http://geoserver:8080/geoserver
+      APP_GEOSERVER_PUBLIC_URL: /csrap_geoserver
+      APP_GEOSERVER_USER: admin
+      APP_GEOSERVER_PASSWORD: geoserver
+      APP_GEOSERVER_WORKSPACE: dwg
+      APP_DICT_SERVICE_BASE_URL: http://172.24.4.66
+    volumes:
+      - ./backend/data:/app/backend/data
+    depends_on:
+      - csrap_geoserver
+    security_opt:
+      - seccomp=unconfined
+
+  csrap_geoserver:
+    build:
+      context: ./geoserver_docker
+      dockerfile: Dockerfile
+    image: libredwg-geoserver:2.28.2
+    ports:
+      - "19080:8080"
     environment:
       GEOSERVER_ADMIN_PASSWORD: geoserver
       GEOSERVER_ADMIN_USER: admin
+      GEOSERVER_HOME: /opt/geoserver
+      GEOSERVER_DATA_DIR: /opt/geoserver_data/
+      INSTALL_EXTENSIONS: "true"
+      STABLE_EXTENSIONS: "vectortiles"
     volumes:
-      - geoserver_data:/opt/geoserver/data_dir
-    # 若希望后端生成的 GPKG 被 GeoServer 直接访问，可将 backend/data 挂载进来，例如：
-    # - ./backend/data:/data:ro
-    # 并在后端配置中将 GPKG 输出到 /data/jobs/... 或通过 REST 使用 file:///data/...
+      - ./backend/data:/app/backend/data:ro
+      - csrap_geoserver_data:/opt/geoserver_data/
+    security_opt:
+      - seccomp=unconfined
+    networks:
+      default:
+        aliases:
+          - geoserver
 
 volumes:
-  geoserver_data: {}
+  csrap_geoserver_data: {}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.25.25.0/24

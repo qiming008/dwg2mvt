@@ -60,23 +60,34 @@ async function resolveGeoServerTarget(envTarget?: string) {
   return candidates[0] || 'http://127.0.0.1:19080'
 }
 
-export default defineConfig(async ({ mode }) => {
+export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = await resolveApiTarget(env.VITE_API_TARGET || env.VITE_BACKEND_URL)
-  const geoserverTarget = await resolveGeoServerTarget(env.VITE_GEOSERVER_TARGET)
+  const autoProxy = env.VITE_AUTO_PROXY === '1'
+  const apiTarget = autoProxy
+    ? await resolveApiTarget(env.VITE_API_TARGET || env.VITE_BACKEND_URL)
+    : env.VITE_API_TARGET || env.VITE_BACKEND_URL || 'http://127.0.0.1:8088'
+  const geoserverTarget = autoProxy
+    ? await resolveGeoServerTarget(env.VITE_GEOSERVER_TARGET)
+    : env.VITE_GEOSERVER_TARGET || 'http://127.0.0.1:19080'
+  const devPort = Number(env.VITE_DEV_PORT || 3666)
+  const publicBase = env.VITE_PUBLIC_BASE || (command === 'build' ? `/${childMicroappName}/` : '/')
 
   return {
-    base: `/${childMicroappName}/`,
+    base: publicBase,
     plugins: [vue(), qiankun(childMicroappName, { useDevMode: true })],
     server: {
       host: '0.0.0.0',
-      port: 3666,
+      port: devPort,
       cors: true,
       headers: {
         'Access-Control-Allow-Origin': '*',
       },
       proxy: {
-        '/csrap_mapapi': { target: apiTarget, changeOrigin: true },
+        '/csrap_mapapi': {
+          target: apiTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/csrap_mapapi/, '/api'),
+        },
         '/jy-csp-gis': { target: apiTarget, changeOrigin: true },
         '/geoserver': { target: geoserverTarget, changeOrigin: true },
         '/csrap_geoserver': {

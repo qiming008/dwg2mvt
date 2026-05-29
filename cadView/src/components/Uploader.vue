@@ -168,7 +168,21 @@ const seamCodeInput = ref('')
 const cleanMode = ref(true)
 
 const seamOptions = ref<SeamOption[]>([])
-const coordinateSystemOptions = ref<CoordinateSystemOption[]>(localCoordinateSystemOptions)
+
+const sortCoordinateSystemOptions = (options: CoordinateSystemOption[]) => {
+  return [...options].sort((a, b) => {
+    const aNum = Number(a.epsgId)
+    const bNum = Number(b.epsgId)
+    if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
+      return aNum - bNum
+    }
+    return a.epsgId.localeCompare(b.epsgId, 'zh-CN', { numeric: true })
+  })
+}
+
+const coordinateSystemOptions = ref<CoordinateSystemOption[]>(
+  sortCoordinateSystemOptions(localCoordinateSystemOptions)
+)
 
 interface MineOption {
   code: string
@@ -251,7 +265,7 @@ const loadCoordinateSystems = async () => {
     const options = await fetchEpsgOptions()
     
     if (options.length > 0) {
-      coordinateSystemOptions.value = options
+      coordinateSystemOptions.value = sortCoordinateSystemOptions(options)
     }
   } catch (error) {
     console.warn('Failed to load EPSG options, fallback to local list.', error)
@@ -461,6 +475,32 @@ onMounted(() => {
 .primary-btn {
   background: linear-gradient(135deg, #4f8cff 0%, #2a68ff 100%);
   color: #fff;
+}
+
+.uploader-submit-btn {
+  height: 48px;
+  min-width: 132px;
+  border-radius: 18px;
+  padding: 0 18px;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 14px 34px rgba(42, 104, 255, 0.24);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    filter 0.18s ease;
+}
+
+.uploader-submit-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 38px rgba(42, 104, 255, 0.3);
+  filter: brightness(1.02);
+}
+
+.uploader-submit-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .secondary-btn {

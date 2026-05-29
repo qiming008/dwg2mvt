@@ -22,15 +22,36 @@
       </div>
     </div>
     <div ref="mapContainer" class="map-container">
-       <button class="mode-toggle-btn" @click="toggleMode" v-if="result">
-         切换为{{ mapMode === 'vector' ? '栅格预览' : '矢量预览' }}
-       </button>
-       <div class="mode-badge" v-if="result">
-         {{ mapMode === 'raster' ? '当前：栅格预览' : '当前：矢量预览' }}
+       <div class="map-toolbar" v-if="result">
+         <button class="mode-toggle-btn" @click="toggleMode">
+           切换为{{ mapMode === 'vector' ? '栅格预览' : '矢量预览' }}
+         </button>
+         <button class="original-preview-btn" @click="openOriginalPreview">
+           原图预览
+         </button>
        </div>
-       <button class="reset-btn" @click="resetView" v-if="result">
+       <div class="mode-badge" v-if="result">
+         {{ mapMode === 'original' ? '当前：原图预览' : mapMode === 'raster' ? '当前：栅格预览' : '当前：矢量预览' }}
+       </div>
+      <button class="reset-btn" @click="resetView" v-if="result">
          重置视角
-       </button>
+      </button>
+      <div
+        v-if="mapMode === 'original'"
+        class="original-preview-viewer"
+        @wheel.prevent="handleOriginalPreviewWheel"
+        @pointerdown="startOriginalPreviewDrag"
+      >
+        <div
+          v-if="originalPreviewSvg"
+          ref="originalPreviewSvgContainer"
+          class="original-preview-svg"
+          v-html="originalPreviewSvg"
+        ></div>
+        <div v-else class="preview-state" :class="{ 'is-error': originalPreviewStatus === 'error' }">
+          {{ originalPreviewMessage }}
+        </div>
+      </div>
        <div class="coords-display" v-if="mouseCoords">
          经度：{{ mouseCoords[0].toFixed(6) }}, 纬度：{{ mouseCoords[1].toFixed(6) }}
        </div>
@@ -40,12 +61,13 @@
 
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { API_ROUTES } from '../api/routes'
-import { requestJson } from '../utils/request'
-import type { ConvertResult, LayerInfo } from '../types'
+import { createAuthHeaders, requestJson } from '../utils/request'
+import { GEOSERVER_PUBLIC_BASE, TILE_PUBLIC_ORIGIN } from '../config'
+import type { ConvertResult, LayerInfo, OriginalPreviewStatus, OriginalPreviewStatusValue } from '../types'
 
 const props = defineProps<{
   result: ConvertResult | null
@@ -61,13 +83,23 @@ const layers = ref<LayerInfo[]>([])
 const selectedLayers = ref<Set<string>>(new Set())
 const isLayerListCollapsed = ref(false)
 const mouseCoords = ref<[number, number] | null>(null)
+const originalPreviewStatus = ref<OriginalPreviewStatusValue>('pending')
+const originalPreviewMessage = ref('原图预览尚未生成')
+const originalPreviewUrl = ref('')
+const originalPreviewSvg = ref('')
+const originalPreviewSvgContainer = ref<HTMLElement | null>(null)
+const originalPreviewViewBox = ref({ x: 0, y: 0, width: 0, height: 0 })
+const originalPreviewBaseViewBox = ref({ x: 0, y: 0, width: 0, height: 0 })
+const originalPreviewDrag = ref({ active: false, x: 0, y: 0 })
+let originalPreviewTimer: number | undefined
+let originalPreviewStartedAt = 0
 watch(isLayerListCollapsed, () => {
   setTimeout(() => {
     map.value?.resize()
   }, 350)
 })
 
-const mapMode = ref<'vector' | 'raster'>('vector')
+const mapMode = ref<'vector' | 'raster' | 'original'>('vector')
 const allLayersSelected = computed(() => {
   const layerNames = new Set(layers.value.map(layer => layer.name))
   if (layerNames.size === 0) return false
@@ -76,6 +108,99 @@ const allLayersSelected = computed(() => {
 })
 
 const normalizeLayerName = (value: unknown): string => String(value ?? '')
+const tilePublicOrigin = TILE_PUBLIC_ORIGIN || window.location.origin
+
+const buildSameOriginUrl = (url: string) => {
+  if (url.startsWith('/')) {
+    return tilePublicOrigin + url
+  }
+  return url
+}
+
+const buildPreviewUrl = (url: string) => {
+  const apiOrigin = new URL(API_ROUTES.jobs, window.location.origin).origin
+  const normalizedUrl = url.startsWith('/') ? new URL(url, apiOrigin).toString() : buildSameOriginUrl(url)
+  const separator = normalizedUrl.includes('?') ? '&' : '?'
+  return `${normalizedUrl}${separator}t=${Date.now()}`
+}
+
+const loadOriginalPreviewSvg = async (url: string) => {
+  const res = await fetch(url, {
+    headers: createAuthHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`)
+  }
+  const svg = await res.text()
+  const safeSvg = svg
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+  originalPreviewSvg.value = safeSvg
+  const viewBox = parseSvgViewBox(safeSvg)
+  if (viewBox) {
+    originalPreviewBaseViewBox.value = viewBox
+    originalPreviewViewBox.value = { ...viewBox }
+  }
+  await nextTick()
+  applyOriginalPreviewViewBox()
+}
+
+const textSizeExpression = [
+  'interpolate',
+  ['linear'],
+  ['zoom'],
+  8,
+  ['max', 2, ['min', 7, ['*', ['to-number', ['get', 'text_size'], 12], 0.12]]],
+  12,
+  ['max', 4, ['min', 18, ['*', ['to-number', ['get', 'text_size'], 12], 0.45]]],
+  16,
+  ['max', 7, ['min', 42, ['*', ['to-number', ['get', 'text_size'], 12], 0.95]]],
+  19,
+  ['max', 9, ['min', 64, ['*', ['to-number', ['get', 'text_size'], 12], 1.25]]],
+] as unknown as maplibregl.ExpressionSpecification
+
+const textAnchorExpression = [
+  'case',
+  ['all', ['<=', ['to-number', ['get', 'anchor_x'], 0.5], 0.25], ['>=', ['to-number', ['get', 'anchor_y'], 0.5], 0.75]], 'top-left',
+  ['all', ['>=', ['to-number', ['get', 'anchor_x'], 0.5], 0.75], ['>=', ['to-number', ['get', 'anchor_y'], 0.5], 0.75]], 'top-right',
+  ['>=', ['to-number', ['get', 'anchor_y'], 0.5], 0.75], 'top',
+  ['all', ['<=', ['to-number', ['get', 'anchor_x'], 0.5], 0.25], ['<=', ['to-number', ['get', 'anchor_y'], 0.5], 0.25]], 'bottom-left',
+  ['all', ['>=', ['to-number', ['get', 'anchor_x'], 0.5], 0.75], ['<=', ['to-number', ['get', 'anchor_y'], 0.5], 0.25]], 'bottom-right',
+  ['<=', ['to-number', ['get', 'anchor_y'], 0.5], 0.25], 'bottom',
+  ['<=', ['to-number', ['get', 'anchor_x'], 0.5], 0.25], 'left',
+  ['>=', ['to-number', ['get', 'anchor_x'], 0.5], 0.75], 'right',
+  'center',
+] as unknown as maplibregl.ExpressionSpecification
+
+const textJustifyExpression = [
+  'case',
+  ['<=', ['to-number', ['get', 'anchor_x'], 0.5], 0.25], 'left',
+  ['>=', ['to-number', ['get', 'anchor_x'], 0.5], 0.75], 'right',
+  'center',
+] as unknown as maplibregl.ExpressionSpecification
+
+const textColorExpression = [
+  'coalesce',
+  ['get', 'text_color'],
+  ['get', 'line_color'],
+  '#ffffff',
+] as unknown as maplibregl.ExpressionSpecification
+
+const normalizeTileUrl = (url: string) => {
+  if (url.startsWith('/')) return buildSameOriginUrl(url)
+
+  try {
+    const parsed = new URL(url)
+    const geoserverPath = parsed.pathname.match(/\/(?:csrap_)?geoserver\/(.*)$/)
+    if (geoserverPath) {
+      return `${tilePublicOrigin}${GEOSERVER_PUBLIC_BASE}/${geoserverPath[1]}${parsed.search}`
+    }
+  } catch {
+    // Keep the original URL if it is not an absolute URL.
+  }
+
+  return url
+}
 
 const buildLayerFilter = (): maplibregl.FilterSpecification => {
   const selectedLayerList = Array.from(selectedLayers.value).map(normalizeLayerName)
@@ -85,14 +210,207 @@ const buildLayerFilter = (): maplibregl.FilterSpecification => {
   return ['in', 'Layer', ...selectedLayerList] as unknown as maplibregl.FilterSpecification
 }
 
+const textFeatureFilter = ['any', ['has', 'Text'], ['has', 'text_content']] as unknown as maplibregl.FilterSpecification
+
+const getDefaultViewBounds = (result: ConvertResult | null): number[] | undefined => {
+  return result?.view_bbox || result?.bbox
+}
+
+const parseSvgViewBox = (svg: string) => {
+  const match = svg.match(/\sviewBox=["']\s*([-\d.]+)[,\s]+([-\d.]+)[,\s]+([-\d.]+)[,\s]+([-\d.]+)\s*["']/i)
+  if (!match) return null
+  const values = match.slice(1).map(Number)
+  if (values.some((value) => !Number.isFinite(value)) || values[2] <= 0 || values[3] <= 0) return null
+  return { x: values[0], y: values[1], width: values[2], height: values[3] }
+}
+
+const applyOriginalPreviewViewBox = () => {
+  const svg = originalPreviewSvgContainer.value?.querySelector('svg')
+  const box = originalPreviewViewBox.value
+  if (!svg || box.width <= 0 || box.height <= 0) return
+  svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`)
+}
+
+const resetOriginalPreviewView = () => {
+  originalPreviewViewBox.value = { ...originalPreviewBaseViewBox.value }
+  nextTick(applyOriginalPreviewViewBox)
+}
+
+const stopOriginalPreviewPolling = () => {
+  if (originalPreviewTimer !== undefined) {
+    window.clearInterval(originalPreviewTimer)
+    originalPreviewTimer = undefined
+  }
+}
+
+const applyOriginalPreviewStatus = (status: OriginalPreviewStatus) => {
+  originalPreviewStatus.value = status.status
+  originalPreviewMessage.value = status.message || (
+    status.status === 'ready'
+      ? '原图预览已生成'
+      : status.status === 'running'
+        ? '正在生成原图预览...'
+        : status.status === 'error'
+          ? '原图预览生成失败'
+          : '原图预览尚未生成'
+  )
+
+  if (status.status === 'ready' && status.url) {
+    const previewUrl = buildPreviewUrl(status.url)
+    originalPreviewUrl.value = previewUrl
+    loadOriginalPreviewSvg(previewUrl).catch((e) => {
+      console.error('Load original preview SVG error:', e)
+      originalPreviewStatus.value = 'error'
+      originalPreviewMessage.value = '加载原图预览失败'
+    })
+    stopOriginalPreviewPolling()
+  }
+
+  if (status.status === 'error') {
+    stopOriginalPreviewPolling()
+  }
+}
+
+const fetchOriginalPreviewStatus = async () => {
+  const jobId = props.result?.job_id
+  if (!jobId) return
+
+  try {
+    const status = await requestJson<OriginalPreviewStatus>(API_ROUTES.originalPreviewStatus(jobId), {
+      method: 'GET',
+    })
+    applyOriginalPreviewStatus(status)
+  } catch (e) {
+    console.error('Fetch original preview status error:', e)
+    originalPreviewStatus.value = 'error'
+    originalPreviewMessage.value = '获取原图预览状态失败'
+    stopOriginalPreviewPolling()
+    return
+  }
+
+  if (originalPreviewStatus.value === 'running' && Date.now() - originalPreviewStartedAt > 5 * 60 * 1000) {
+    originalPreviewStatus.value = 'error'
+    originalPreviewMessage.value = '原图预览生成时间较长，请稍后重新打开查看'
+    stopOriginalPreviewPolling()
+  }
+}
+
+const startOriginalPreviewPolling = () => {
+  stopOriginalPreviewPolling()
+  originalPreviewTimer = window.setInterval(fetchOriginalPreviewStatus, 2000)
+}
+
+const openOriginalPreview = async () => {
+  const jobId = props.result?.job_id
+  if (!jobId) return
+
+  mapMode.value = 'original'
+  renderMapLayers()
+  resetOriginalPreviewView()
+  originalPreviewUrl.value = ''
+  originalPreviewSvg.value = ''
+  originalPreviewStatus.value = 'running'
+  originalPreviewMessage.value = '正在准备原图预览...'
+  originalPreviewStartedAt = Date.now()
+
+  try {
+    const status = await requestJson<OriginalPreviewStatus>(API_ROUTES.originalPreviewStart(jobId), {
+      method: 'POST',
+    })
+    applyOriginalPreviewStatus(status)
+    if (status.status === 'running' || status.status === 'pending') {
+      startOriginalPreviewPolling()
+    }
+  } catch (e) {
+    console.error('Start original preview error:', e)
+    originalPreviewStatus.value = 'error'
+    originalPreviewMessage.value = '启动原图预览失败'
+    stopOriginalPreviewPolling()
+  }
+}
+
+const handleOriginalPreviewWheel = (event: WheelEvent) => {
+  const svg = originalPreviewSvgContainer.value?.querySelector('svg')
+  const rect = svg?.getBoundingClientRect()
+  const base = originalPreviewBaseViewBox.value
+  const current = originalPreviewViewBox.value
+  if (!rect || rect.width <= 0 || rect.height <= 0 || base.width <= 0 || base.height <= 0 || current.width <= 0) return
+
+  const zoom = event.deltaY < 0 ? 1.18 : 0.85
+  const minWidth = base.width / 32
+  const maxWidth = base.width * 1.5
+  const nextWidth = Math.min(maxWidth, Math.max(minWidth, current.width / zoom))
+  const nextHeight = nextWidth * (current.height / current.width)
+  const ratioX = (event.clientX - rect.left) / rect.width
+  const ratioY = (event.clientY - rect.top) / rect.height
+  const anchorX = current.x + current.width * ratioX
+  const anchorY = current.y + current.height * ratioY
+  originalPreviewViewBox.value = {
+    x: anchorX - nextWidth * ratioX,
+    y: anchorY - nextHeight * ratioY,
+    width: nextWidth,
+    height: nextHeight,
+  }
+  applyOriginalPreviewViewBox()
+}
+
+const startOriginalPreviewDrag = (event: PointerEvent) => {
+  if (event.button !== 0) return
+  ;(event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId)
+  originalPreviewDrag.value = {
+    active: true,
+    x: event.clientX,
+    y: event.clientY,
+  }
+  window.addEventListener('pointermove', handleOriginalPreviewDrag)
+  window.addEventListener('pointerup', stopOriginalPreviewDrag)
+  window.addEventListener('pointercancel', stopOriginalPreviewDrag)
+}
+
+const handleOriginalPreviewDrag = (event: PointerEvent) => {
+  if (!originalPreviewDrag.value.active) return
+  event.preventDefault()
+  const dx = event.clientX - originalPreviewDrag.value.x
+  const dy = event.clientY - originalPreviewDrag.value.y
+  const svg = originalPreviewSvgContainer.value?.querySelector('svg')
+  const rect = svg?.getBoundingClientRect()
+  const current = originalPreviewViewBox.value
+  if (rect && rect.width > 0 && rect.height > 0 && current.width > 0 && current.height > 0) {
+    originalPreviewViewBox.value = {
+      x: current.x - dx * (current.width / rect.width),
+      y: current.y - dy * (current.height / rect.height),
+      width: current.width,
+      height: current.height,
+    }
+    applyOriginalPreviewViewBox()
+  }
+  originalPreviewDrag.value = {
+    active: true,
+    x: event.clientX,
+    y: event.clientY,
+  }
+}
+
+const stopOriginalPreviewDrag = () => {
+  originalPreviewDrag.value.active = false
+  window.removeEventListener('pointermove', handleOriginalPreviewDrag)
+  window.removeEventListener('pointerup', stopOriginalPreviewDrag)
+  window.removeEventListener('pointercancel', stopOriginalPreviewDrag)
+}
+
 const toggleMode = () => {
   mapMode.value = mapMode.value === 'vector' ? 'raster' : 'vector'
   renderMapLayers()
 }
 
 const resetView = () => {
-  if (!map.value || !props.result?.bbox) return
-  const [minX, minY, maxX, maxY] = props.result.bbox
+  if (mapMode.value === 'original') {
+    resetOriginalPreviewView()
+    return
+  }
+  const bounds = getDefaultViewBounds(props.result)
+  if (!map.value || !bounds) return
+  const [minX, minY, maxX, maxY] = bounds
   // Validate bounds
   const isValid = (n: number) => Number.isFinite(n) && Math.abs(n) < 1e20
   const isValidLat = (n: number) => n >= -90 && n <= 90
@@ -100,12 +418,12 @@ const resetView = () => {
   if (isValid(minX) && isValid(minY) && isValid(maxX) && isValid(maxY) &&
       isValidLat(minY) && isValidLat(maxY)) {
     try {
-      map.value.fitBounds(props.result.bbox as [number, number, number, number], { padding: 50 })
+      map.value.fitBounds(bounds as [number, number, number, number], { padding: 50 })
     } catch (e) {
       console.error('Error fitting bounds:', e)
     }
   } else {
-    console.warn('Invalid bounds, cannot reset view:', props.result.bbox)
+    console.warn('Invalid bounds, cannot reset view:', bounds)
   }
 }
 
@@ -148,9 +466,9 @@ const updateMapFilters = () => {
     )
   }
 
-  // Update text layer (preserve 'has Text' check)
+  // Update text layer
   if (map.value.getLayer('dwg-layer-text')) {
-    map.value.setFilter('dwg-layer-text', ['all', ['has', 'Text'], layerFilter] as maplibregl.FilterSpecification)
+    map.value.setFilter('dwg-layer-text', ['all', textFeatureFilter, layerFilter] as maplibregl.FilterSpecification)
   }
 }
 
@@ -170,12 +488,13 @@ const renderMapLayers = () => {
   if (map.value.getLayer(layerIdRaster)) map.value.removeLayer(layerIdRaster)
   if (map.value.getSource(sourceId)) map.value.removeSource(sourceId)
 
+  if (mapMode.value === 'original') return
+
   if (mapMode.value === 'raster') {
     if (!props.result.raster_url) {
       console.warn('No raster URL available')
     } else {
-      let rasterUrl = props.result.raster_url
-      if (rasterUrl.startsWith('/')) rasterUrl = window.location.origin + rasterUrl
+      const rasterUrl = normalizeTileUrl(props.result.raster_url)
 
       map.value.addSource(sourceId, {
         type: 'raster',
@@ -199,10 +518,7 @@ const renderMapLayers = () => {
   // Vector Mode
   if (!props.result.mvt_url) return
 
-  let mvtUrl = props.result.mvt_url
-  if (mvtUrl.startsWith('/')) {
-    mvtUrl = window.location.origin + mvtUrl
-  }
+  const mvtUrl = normalizeTileUrl(props.result.mvt_url)
   
   console.log('Loading MVT URL in MapLibre:', mvtUrl)
 
@@ -221,7 +537,10 @@ const renderMapLayers = () => {
     type: 'fill',
     source: sourceId,
     'source-layer': sourceLayer,
-    filter: ['==', '$type', 'Polygon'],
+    filter: [
+      'all',
+      ['==', '$type', 'Polygon']
+    ] as unknown as maplibregl.FilterSpecification,
     paint: {
       'fill-color': ['coalesce', ['get', 'fill_color'], 'rgba(0,0,0,0)'],
       'fill-opacity': 0.8,
@@ -254,18 +573,22 @@ const renderMapLayers = () => {
     source: sourceId,
     'source-layer': sourceLayer,
     layout: {
-      'text-field': ['get', 'Text'],
-      'text-size': 12,
-      'text-rotate': ['get', 'rotation'],
-      'text-allow-overlap': false,
-      'text-ignore-placement': false,
+      'text-field': ['coalesce', ['get', 'text_content'], ['get', 'Text']],
+      'text-size': textSizeExpression,
+      'text-rotate': ['coalesce', ['get', 'text_angle'], ['get', 'rotation'], 0],
+      'text-anchor': textAnchorExpression,
+      'text-justify': textJustifyExpression,
+      'text-max-width': 1000,
+      'text-line-height': 1,
+      'text-allow-overlap': true,
+      'text-ignore-placement': true,
       'text-rotation-alignment': 'map',
       'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular']
     },
     paint: {
-      'text-color': '#ffffff'
+      'text-color': textColorExpression
     },
-    filter: ['has', 'Text']
+    filter: textFeatureFilter
   })
   
   // Re-apply filters if needed
@@ -311,6 +634,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopOriginalPreviewPolling()
+  stopOriginalPreviewDrag()
   if (map.value) {
     map.value.remove()
     map.value = null
@@ -348,24 +673,25 @@ watch(() => props.result, async (newVal) => {
 
   // 2. Fit Bounds First (to prevent loading tiles for wrong location)
   // Note: MVT doesn't provide bounds automatically, so we use the bounds from the conversion result.
-  console.log('Conversion result bounds:', newVal.bbox)
-  if (newVal.bbox) {
-    const [minX, minY, maxX, maxY] = newVal.bbox
+  const viewBounds = getDefaultViewBounds(newVal)
+  console.log('Conversion result bounds:', newVal.bbox, 'view bounds:', viewBounds)
+  if (viewBounds) {
+    const [minX, minY, maxX, maxY] = viewBounds
     // Validate bounds to prevent MapLibre error
     const isValid = (n: number) => Number.isFinite(n) && Math.abs(n) < 1e20
     const isValidLat = (n: number) => n >= -90 && n <= 90
     
     if (isValid(minX) && isValid(minY) && isValid(maxX) && isValid(maxY) &&
         isValidLat(minY) && isValidLat(maxY)) {
-      console.log('Fitting bounds:', newVal.bbox)
+      console.log('Fitting bounds:', viewBounds)
       try {
         // Use animate: false to jump immediately before loading layers
-        map.value.fitBounds(newVal.bbox as [number, number, number, number], { padding: 50, animate: false })
+        map.value.fitBounds(viewBounds as [number, number, number, number], { padding: 50, animate: false })
       } catch (e) {
         console.error('Error fitting bounds:', e)
       }
     } else {
-      console.warn('Invalid bounds detected, skipping fitBounds:', newVal.bbox)
+      console.warn('Invalid bounds detected, skipping fitBounds:', viewBounds)
     }
   }
 
@@ -477,11 +803,16 @@ watch(() => props.result, async (newVal) => {
   border: 1px solid rgba(255,255,255,0.2);
 }
 
-.mode-toggle-btn {
+.map-toolbar {
   position: absolute;
   top: 10px;
   right: 60px;
   z-index: 10;
+  display: flex;
+  gap: 8px;
+}
+
+.mode-toggle-btn {
   background-color: rgba(30, 41, 59, 0.8);
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -531,6 +862,22 @@ watch(() => props.result, async (newVal) => {
   background-color: #2563eb;
 }
 
+.original-preview-btn {
+  background-color: #10b981;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  transition: background-color 0.2s;
+}
+
+.original-preview-btn:hover {
+  background-color: #059669;
+}
+
 .coords-display {
   position: absolute;
   bottom: 10px;
@@ -558,5 +905,51 @@ watch(() => props.result, async (newVal) => {
   height: 100%;
   background: rgb(11, 32, 81);
   position: relative;
+}
+
+.original-preview-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #050505;
+  cursor: grab;
+  touch-action: none;
+}
+
+.original-preview-viewer:active {
+  cursor: grabbing;
+}
+
+.original-preview-svg {
+  max-width: 96%;
+  max-height: 96%;
+  user-select: none;
+  pointer-events: none;
+}
+
+.original-preview-svg :deep(svg) {
+  display: block;
+  width: min(100%, 96vw);
+  height: min(100%, 96vh);
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.preview-state {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: #e5e7eb;
+  text-align: center;
+}
+
+.preview-state.is-error {
+  color: #fecaca;
 }
 </style>

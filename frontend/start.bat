@@ -1,41 +1,54 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
+
 echo ========================================
-echo   DWG 转切片 - 前端启动脚本
+echo   LibreDWG Frontend Launcher
 echo ========================================
 echo.
 
-REM 检查 Node.js 是否安装
+rem Check Node.js
 node --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到 Node.js，请先安装 Node.js 18+
-    echo 下载地址: https://nodejs.org/
+    echo [ERROR] Node.js was not found. Please install Node.js 18+ first.
+    echo Download: https://nodejs.org/
     pause
     exit /b 1
 )
 
-echo [1/2] 检查依赖...
+node -e "const m=Number(process.versions.node.split('.')[0]); process.exit(m>=18?0:1)" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Node.js 18+ is required. Current version is:
+    node --version
+    echo Please install Node.js 18 or newer, then rerun this launcher.
+    pause
+    exit /b 1
+)
+
+echo [1/3] Checking frontend dependencies...
 if not exist "node_modules" (
-    echo 首次运行，正在安装依赖（可能需要几分钟）...
+    echo node_modules not found. Installing dependencies...
     call npm install
     if errorlevel 1 (
-        echo [错误] 依赖安装失败
+        echo [ERROR] Dependency installation failed.
         pause
         exit /b 1
     )
 ) else (
-    echo 依赖已安装
+    echo Dependencies already installed.
 )
 
-echo [2/2] 启动前端开发服务器...
+echo [2/3] Starting frontend dev server...
 echo.
 echo ========================================
-echo   前端地址: http://localhost:5173
-echo   请确保后端已启动: http://localhost:8000
-echo   按 Ctrl+C 停止
+echo   Frontend: http://localhost:5173
+echo   Backend:  http://localhost:8088
+echo   GeoServer: http://localhost:19080
+echo   Press Ctrl+C to stop
 echo ========================================
 echo.
 
 call npm run dev
 
 pause
+exit /b 0

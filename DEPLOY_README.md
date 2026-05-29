@@ -1,68 +1,186 @@
-# Windows 服务器部署指南
+# 前后端部署说明
 
-## 1. 环境准备
-1. **Python**: 安装 Python 3.11 或更高版本，务必勾选 "Add Python to PATH"。
-2. **GeoServer**: 确保 GeoServer 已安装并运行（默认端口 8080）。
-3. **依赖库**: 
-   - 本项目自带 `tools` 目录包含了 GDAL 和 LibreDWG，无需单独安装。
-   - 首次运行前，请先执行一次 `start.bat` 以自动创建虚拟环境并安装 Python 依赖。
+这份说明对应当前这套离线部署方式。
 
-## 2. 配置文件 (.env)
-在 `backend` 目录下，复制 `.env.example` 为 `.env`，并修改以下关键配置：
+- 后端使用生成的 `tar` 包部署
+- 前端单独打包成 `cadView.zip`
+- 后端放到服务器根目录下的 `/opt/libredwg`
+- 前端放到服务器的 `/JYKJCLOUD/JY-MICRO-MAP`
+- 前端的 `config` 文件夹也放在前端目录中
+- 最后通过重载 `nginx` 生效
+- 后端打包前请清空 `backend/data/jobs` 和 `backend/data/layer_metadata`，这些是开发和测试过程里的运行数据，不应该打进部署包
 
-```ini
-# GeoServer 内部访问地址（后端服务用）
-APP_GEOSERVER_URL=http://localhost:8080/geoserver
+---
 
-# GeoServer 公网访问地址（前端浏览器用）
-# 如果你有域名，填 http://your-domain.com/geoserver
-# 如果是 IP 访问，填 http://192.168.x.x:8080/geoserver
-APP_GEOSERVER_PUBLIC_URL=http://<服务器IP或域名>:8080/geoserver
+## 1. 目录约定
 
-# 如果 GeoServer 密码修改过，请同步修改
-APP_GEOSERVER_USER=admin
-APP_GEOSERVER_PASSWORD=geoserver
+服务器上建议使用下面的目录：
+
+```text
+/opt/libredwg
+/JYKJCLOUD/JY-MICRO-MAP
 ```
 
-## 3. 启动服务
-- **首次运行**: 双击 `start.bat`，它会自动安装依赖并启动开发服务器。确认无误后关闭。
-- **生产环境启动**: 双击 `start_prod.bat`（新创建的脚本）。
-  - 该脚本会以多进程模式运行，性能更好。
-  - 默认监听 `0.0.0.0:8000`。
 
-## 4. 域名与端口配置 (推荐使用 Nginx 或 IIS)
-虽然可以通过修改 `start_prod.bat` 直接监听 80 端口，但推荐使用 Nginx 或 IIS 进行反向代理，这样更安全且方便管理 SSL 证书。
+## 2. 后端部署
 
-### Nginx 配置示例
-假设你的域名是 `dwg.example.com`：
+### 2.1 上传文件
+
+把下面两个文件上传到服务器 `/opt/libredwg`：
+
+- `libredwg-images.tar`
+- `libredwg-source.tar.gz`
+
+### 2.2 解压源码包
+
+如果你要重新生成源码包，先确保 `backend/data/jobs` 和 `backend/data/layer_metadata` 已清空。
+
+```bash
+cd /opt/libredwg
+tar -xzf libredwg-source.tar.gz
+```
+
+### 2.3 导入镜像
+
+```bash
+cd /opt/libredwg
+docker load -i libredwg-images.tar
+```
+
+### 2.4 启动后端
+
+```bash
+cd /opt/libredwg
+docker-compose -f docker-compose.offline.yml down --remove-orphans
+docker-compose -f docker-compose.offline.yml up -d
+docker-compose -f docker-compose.offline.yml ps
+```
+
+### 2.5 常用检查命令
+
+```bash
+docker-compose -f docker-compose.offline.yml logs --tail=200 backend
+docker-compose -f docker-compose.offline.yml logs --tail=200 csrap_geoserver
+```
+
+### 2.6 后端访问地址
+
+- 后端 API：`http://<服务器IP>:19010/docs`
+- GeoServer：`http://<服务器IP>:19080/geoserver`
+
+---
+
+## 3. 前端部署
+
+### 3.1 上传文件
+
+把你打好的 `cadView.zip` 上传到服务器的：
+
+```text
+/JYKJCLOUD/JY-MICRO-MAP
+```
+
+### 3.2 解压前端
+
+```bash
+cd /JYKJCLOUD/JY-MICRO-MAP
+unzip -o cadView.zip
+```
+
+解压后确认目录结构类似：
+
+```text
+/JYKJCLOUD/JY-MICRO-MAP/
+├── cadView/
+├── config/
+└── 其他静态文件
+```
+
+### 3.3 前端 nginx 配置
+
+前端站点建议指向 `cadView` 目录。
+
+示例配置：
 
 ```nginx
 server {
-    listen 80;
-    server_name dwg.example.com;
+    listen 19001;
+    server_name localhost;
+    gzip_static on;
+    gzip_http_version 1.0;
+    root /JYKJCLOUD/JY-MICRO-MAP/cadView;
 
-    # 前端静态文件 (需先执行 npm run build)
+    index index.html;
+
     location / {
-        root D:/project/LibreDWG/frontend/dist;
+        root /JYKJCLOUD/JY-MICRO-MAP/cadView;
+        try_files $uri $uri/ /index.html last;
         index index.html;
-        try_files $uri $uri/ /index.html;
-    }
-
-    # 后端 API 代理
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # GeoServer 代理 (可选，如果不直接暴露 8080)
-    location /geoserver/ {
-        proxy_pass http://127.0.0.1:8080/geoserver/;
-        proxy_set_header Host $host;
     }
 }
 ```
 
-### 常见问题
-1. **防火墙**: 确保服务器防火墙开放了 8000 端口（如果直接访问）或 80/443 端口（如果用 Nginx）。
-2. **GDAL 错误**: 如果遇到 DLL 缺失错误，请安装 `VC_redist.x64.exe` (Visual C++ Redistributable)。
+如果你已经把 nginx 配置文件放进了 `config` 目录，就把对应的配置文件替换到服务器正在使用的位置。
+
+---
+
+## 4. 重载 nginx
+
+如果前端是容器里的 nginx，执行：
+
+```bash
+docker exec -it jykjcloudx-front nginx -s reload
+```
+
+如果你是直接在宿主机上跑 nginx，就执行：
+
+```bash
+nginx -s reload
+```
+
+---
+
+## 5. 标准更新流程
+
+如果后面只更新后端，按这个顺序：
+
+```bash
+cd /opt/libredwg
+docker-compose -f docker-compose.offline.yml down --remove-orphans
+docker load -i libredwg-images.tar
+tar -xzf libredwg-source.tar.gz
+docker-compose -f docker-compose.offline.yml up -d
+```
+
+如果只更新前端，按这个顺序：
+
+```bash
+cd /JYKJCLOUD/JY-MICRO-MAP
+unzip -o cadView.zip
+docker exec -it jykjcloudx-front nginx -s reload
+```
+
+---
+
+
+---
+
+## 7. 注意事项
+
+- 后端和前端更新前，先确认没有旧容器占着同样端口
+- 如果出现 `port is already allocated`，先查清楚是不是旧容器还在
+- 前端 `config` 文件夹不要漏掉
+- 前端改完静态文件后，记得重载 nginx，不然不会生效
+- 后端部署时不要在服务器上重新 `docker build`，直接用我导出的 `tar` 包
+
+---
+
+## 8. 备忘
+
+这套项目的关键文件是：
+
+- 后端镜像：`libredwg-images.tar`
+- 后端源码包：`libredwg-source.tar.gz`
+- 前端包：`cadView.zip`
+- 前端站点目录：`/JYKJCLOUD/JY-MICRO-MAP`
+- 后端部署目录：`/opt/libredwg`

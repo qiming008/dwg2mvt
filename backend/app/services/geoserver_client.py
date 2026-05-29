@@ -1,12 +1,14 @@
-# -*- coding: utf-8 -*-
-"""通过 GeoServer REST API 发布 GeoPackage 为 MVT/WMTS 图层"""
+﻿# -*- coding: utf-8 -*-
+"""Publish GeoPackage layers to GeoServer and build MVT/WMTS URLs."""
 import base64
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 import httpx
 
 from app.config import settings
+from app.services.wmts_security import build_wmts_token
 
 
 def _auth_headers() -> dict:
@@ -18,6 +20,35 @@ def _auth_headers() -> dict:
 def _rest(url_path: str) -> str:
     base = settings.geoserver_url.rstrip("/")
     return f"{base}/rest/{url_path}"
+
+
+def _public_base() -> str:
+    return settings.geoserver_public_url.rstrip("/")
+
+
+def _quote_layer_name(layer_name: str) -> str:
+    try:
+        return quote(f"{settings.geoserver_workspace}:{layer_name}", safe="")
+    except Exception:
+        return f"{settings.geoserver_workspace}:{layer_name}"
+
+
+def _append_wmts_token(url: str, resource: str, layer_name: str | None = None) -> str:
+    token = build_wmts_token(resource, layer_name)
+    return f"{url}&wmts_token={quote(token, safe='')}"
+
+
+def _delete_geo_resource(client: httpx.Client, url: str, headers: dict) -> None:
+    """Delete a GeoServer REST resource if it exists."""
+    r = client.get(url, headers=headers)
+    if r.status_code == 404:
+        return
+    if r.status_code != 200:
+        return
+    try:
+        client.delete(f"{url}?recurse=true", headers=headers)
+    except Exception:
+        pass
 
 
 DWG_SLD = """<?xml version="1.0" encoding="ISO-8859-1"?>
@@ -470,7 +501,7 @@ def ensure_dwg_style() -> tuple[bool, str]:
 
 
 def ensure_workspace() -> tuple[bool, str]:
-    """创建 workspace 若不存在"""
+    """Create the GeoServer workspace if it does not exist."""
     try:
         url = _rest(f"workspaces/{settings.geoserver_workspace}.json")
         with httpx.Client(timeout=30.0) as client:
@@ -478,12 +509,12 @@ def ensure_workspace() -> tuple[bool, str]:
             if r.status_code == 200:
                 return True, ""
             if r.status_code != 404:
-                return False, f"检查 workspace 失败: {r.status_code} {r.text[:200]}"
+                return False, f"Check workspace failed: {r.status_code} {r.text[:200]}"
             create_url = _rest("workspaces")
             body = {"workspace": {"name": settings.geoserver_workspace}}
             r2 = client.post(create_url, headers={**_auth_headers(), "Content-Type": "application/json"}, json=body)
             if r2.status_code not in (200, 201):
-                return False, f"创建 workspace 失败: {r2.status_code} {r2.text[:200]}"
+                return False, f"Create workspace failed: {r2.status_code} {r2.text[:200]}"
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -516,10 +547,37 @@ def truncate_gwc_layer(layer_name: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def delete_published_layer(layer_name: str, store_name: str | None = None) -> tuple[bool, str]:
+    """Delete a published GeoServer layer/store and clear its GWC cache."""
+    try:
+        ws = settings.geoserver_workspace
+        base = settings.geoserver_url.rstrip("/")
+        full_layer_name = f"{ws}:{layer_name}"
+
+        with httpx.Client(timeout=30.0) as client:
+            headers = _auth_headers()
+
+            # Remove the GWC layer configuration if it exists.
+            try:
+                client.delete(f"{base}/gwc/rest/layers/{full_layer_name}.xml", headers=headers)
+            except Exception:
+                pass
+
+            # Clear stale cached tiles for the layer.
+            truncate_gwc_layer(layer_name)
+
+            # Remove the published layer and datastore.
+            _delete_geo_resource(client, _rest(f"workspaces/{ws}/layers/{layer_name}.json"), headers)
+            if store_name:
+                _delete_geo_resource(client, _rest(f"workspaces/{ws}/datastores/{store_name}.json"), headers)
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def enable_gwc_mvt(layer_name: str) -> tuple[bool, str]:
-    """
-    配置 GWC 缓存，启用 application/vnd.mapbox-vector-tile 格式
-    """
+    """Configure GWC cache and enable Mapbox vector tile output."""
     try:
         ws = settings.geoserver_workspace
         full_layer_name = f"{ws}:{layer_name}"
@@ -572,14 +630,16 @@ def enable_gwc_mvt(layer_name: str) -> tuple[bool, str]:
         
         param_filters = ET.SubElement(root, "parameterFilters")
         spf = ET.SubElement(param_filters, "stringParameterFilter")
-        ET.SubElement(spf, "key").text = "STYLES"
+        ET.SubElement(spf, "key").text = "STYLE"
         ET.SubElement(spf, "defaultValue")
         values = ET.SubElement(spf, "values")
-        ET.SubElement(values, "string") # Empty string
+        ET.SubElement(values, "string")  # Empty string
         # Ensure BOTH styles are available in the GWC filter
+        ET.SubElement(values, "string").text = "dwg_generic_style"
+        ET.SubElement(values, "string").text = "dwg_raster_style"
         ET.SubElement(values, "string").text = f"{ws}:dwg_generic_style"
         ET.SubElement(values, "string").text = f"{ws}:dwg_raster_style"
-        
+
         xml_body = ET.tostring(root, encoding="unicode")
 
         with httpx.Client(timeout=30.0) as client:
@@ -606,19 +666,16 @@ def enable_gwc_mvt(layer_name: str) -> tuple[bool, str]:
                 )
                 if r2.status_code in (200, 201):
                     return True, ""
-                return False, f"GWC Layer 创建失败: {r2.status_code} {r2.text[:200]}"
+                return False, f"GWC layer create failed: {r2.status_code} {r2.text[:200]}"
                 
-            return False, f"GWC Layer 配置失败: {r.status_code} {r.text[:200]}"
+            return False, f"GWC layer config failed: {r.status_code} {r.text[:200]}"
 
     except Exception as e:
         return False, str(e)
 
 
 def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer_name: str = None) -> tuple[bool, str]:
-    """
-    将 GeoPackage 文件发布到 GeoServer。
-    native_layer_name: GPKG 中的表名（若不提供，默认尝试自动推断或与 layer_name 相同）
-    """
+    """Publish a GeoPackage layer to GeoServer."""
     try:
         gpkg_path = Path(gpkg_path).resolve()
         if not gpkg_path.exists():
@@ -634,10 +691,9 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
 
         with httpx.Client(timeout=30.0) as client:
             h = _auth_headers()
-            # 1. 创建 datastore (GeoPackage)
+            # 1. Create the GeoPackage datastore.
             store_url = _rest(f"workspaces/{ws}/datastores/{store_name}.json")
-            # GeoServer 2.19+ 支持 GeoPackage：使用 file 存储，path 为 file:///path/to/file.gpkg
-            # Connection Parameters (Flat format for recent GeoServer REST API)
+            # Recent GeoServer versions accept a flat GeoPackage connection parameter map.
             body = {
                 "dataStore": {
                     "name": store_name,
@@ -658,15 +714,15 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
                     json=body,
                 )
                 if r2.status_code not in (200, 201):
-                    return False, f"创建 datastore 失败: {r2.status_code} {r2.text[:300]}"
+                    return False, f"Create datastore failed: {r2.status_code} {r2.text[:300]}"
             elif r.status_code != 200:
-                return False, f"查询 datastore 失败: {r.status_code}"
+                return False, f"Query datastore failed: {r.status_code}"
 
-            # 2. 发布图层
+            # 2. Publish the feature type.
             layers_url = _rest(f"workspaces/{ws}/datastores/{store_name}/featuretypes.json")
             r3 = client.get(layers_url, headers=h)
             if r3.status_code != 200:
-                return False, f"获取 feature types 失败: {r3.status_code} {r3.text[:200]}"
+                return False, f"Fetch feature types failed: {r3.status_code} {r3.text[:200]}"
             
             try:
                 data = r3.json()
@@ -677,22 +733,31 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
             except Exception:
                 ft_name = layer_name
 
+            # If the target layer already exists in GeoServer, remove it first so
+            # we can publish the new DWG under the same stable name.
+            _delete_geo_resource(client, _rest(f"workspaces/{ws}/layers/{layer_name}.json"), h)
+            _delete_geo_resource(
+                client,
+                _rest(f"workspaces/{ws}/datastores/{store_name}/featuretypes/{layer_name}.json"),
+                h,
+            )
+
             ft_url = _rest(f"workspaces/{ws}/datastores/{store_name}/featuretypes/{ft_name}.json")
             r4 = client.get(ft_url, headers=h)
             if r4.status_code == 404:
                 create_ft_url = _rest(f"workspaces/{ws}/datastores/{store_name}/featuretypes.json")
+                publish_name = layer_name
+                native_name = native_layer_name or "entities"
                 
                 ft_body = {
                     "featureType": {
-                        "name": layer_name,
-                        "title": layer_name
+                        "name": publish_name,
+                        "nativeName": native_name,
+                        "title": layer_name,
+                        "enabled": True,
+                        "srs": "EPSG:4326",
                     }
                 }
-                if native_layer_name:
-                    ft_body["featureType"]["nativeName"] = native_layer_name
-                elif ft_name != layer_name:
-                     # If we found an existing name, use it? No, we are creating.
-                     pass
                 
                 r_create = client.post(
                     create_ft_url,
@@ -700,10 +765,13 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
                     json=ft_body,
                 )
                 if r_create.status_code not in (200, 201):
-                    return False, f"创建 featureType 失败: {r_create.status_code} {r_create.text[:200]}"
+                    return False, (
+                        f"create featureType failed: {r_create.status_code} "
+                        f"{r_create.text[:400]} payload={ft_body}"
+                    )
                 
                 # Update ft_name to the one we just created
-                ft_name = layer_name
+                ft_name = publish_name
 
             # 2.5 Update layer styles
             # Do NOT set defaultStyle to dwg_generic_style as it breaks MVT filtering (MVT needs raw data).
@@ -721,12 +789,12 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
             }
             client.put(layer_url, headers={**h, "Content-Type": "application/json"}, json=layer_body)
 
-        # 3. 启用 GWC MVT 缓存
+        # 3. Enable GWC vector tile caching.
         ok_gwc, msg_gwc = enable_gwc_mvt(ft_name)
         if not ok_gwc:
-            return False, f"GWC 切片配置失败: {msg_gwc}"
+            return False, f"GWC tile config failed: {msg_gwc}"
         
-        # 4. 清理旧缓存 (解决更新后显示旧数据问题)
+        # 4. Clear stale cache after republishing the layer.
         truncate_gwc_layer(ft_name)
             
         return True, ""
@@ -735,17 +803,10 @@ def publish_gpkg(gpkg_path: Path, store_name: str, layer_name: str, native_layer
 
 
 def get_mvt_url(layer_name: str) -> str:
-    """返回该图层的 MVT 矢量切片 URL 模板（OpenLayers 等可用）"""
-    # GeoServer GWC WMTS 矢量切片示例:
-    # {base}/gwc/service/wmts?layer=workspace:layer&tilematrixset=EPSG:900913&...
-    base = (settings.geoserver_public_url or settings.geoserver_url).rstrip("/")
-    ws = settings.geoserver_workspace
-    try:
-        from urllib.parse import quote
-        layer_param = quote(f"{ws}:{layer_name}")
-    except Exception:
-        layer_param = f"{ws}:{layer_name}"
-    return (
+    """Return the MVT tile URL template for a published layer."""
+    base = _public_base()
+    layer_param = _quote_layer_name(layer_name)
+    url = (
         f"{base}/gwc/service/wmts?"
         f"layer={layer_param}"
         "&tilematrixset=EPSG:900913"
@@ -753,39 +814,30 @@ def get_mvt_url(layer_name: str) -> str:
         "&Format=application/vnd.mapbox-vector-tile"
         "&TileMatrix=EPSG:900913:{z}&TileRow={y}&TileCol={x}"
     )
+    return _append_wmts_token(url, "mvt", f"{settings.geoserver_workspace}:{layer_name}")
 
 
 def get_raster_url(layer_name: str) -> str:
-    """返回该图层的 XYZ 栅格切片 URL 模板"""
-    base = (settings.geoserver_public_url or settings.geoserver_url).rstrip("/")
-    ws = settings.geoserver_workspace
-    
-    style_name = "dwg_generic_style"
-    full_style_name = f"{ws}:{style_name}"
-    
-    try:
-        from urllib.parse import quote
-        layer_param = quote(f"{ws}:{layer_name}")
-        style_param = quote(full_style_name)
-    except Exception:
-        layer_param = f"{ws}:{layer_name}"
-        style_param = full_style_name
-        
-    return (
+    """Return the raster tile URL template for a published layer."""
+    base = _public_base()
+    layer_param = _quote_layer_name(layer_name)
+    url = (
         f"{base}/gwc/service/wmts?"
         f"layer={layer_param}"
+        f"&STYLE=dwg_raster_style"
         "&tilematrixset=EPSG:900913"
         "&Service=WMTS&Request=GetTile&Version=1.0.0"
         "&Format=image/png"
-        f"&style={style_param}"
         "&TileMatrix=EPSG:900913:{z}&TileRow={y}&TileCol={x}"
     )
+    return _append_wmts_token(url, "raster", f"{settings.geoserver_workspace}:{layer_name}")
 
 
 def get_wmts_capabilities_url() -> str:
-    """WMTS 能力文档 URL"""
-    base = (settings.geoserver_public_url or settings.geoserver_url).rstrip("/")
-    return f"{base}/gwc/service/wmts?request=GetCapabilities"
+    """Return the WMTS GetCapabilities URL."""
+    base = _public_base()
+    url = f"{base}/gwc/service/wmts?request=GetCapabilities"
+    return _append_wmts_token(url, "capabilities")
 
 def ensure_dwg_raster_style() -> tuple[bool, str]:
     """Ensure dwg_raster_style exists (for raster tiles with better text/color)"""
@@ -859,7 +911,7 @@ def _update_gwc_layer_styles(layer_name: str, style_name: str) -> None:
             if param_filters:
                 for spf in param_filters.findall("stringParameterFilter"):
                     key = spf.find("key")
-                    if key is not None and key.text == "STYLES":
+                    if key is not None and key.text == "STYLE":
                         values = spf.find("values")
                         if values is not None:
                             # Check if style already exists in values
@@ -928,26 +980,18 @@ def add_raster_style_to_layer(layer_name: str) -> tuple[bool, str]:
 
 def get_raster_url_v2(layer_name: str) -> str:
     """Return XYZ raster tile URL using the new dwg_raster_style"""
-    base = (settings.geoserver_public_url or settings.geoserver_url).rstrip("/")
-    ws = settings.geoserver_workspace
-    
-    style_name = "dwg_raster_style"
-    full_style_name = f"{ws}:{style_name}"
-    
-    try:
-        from urllib.parse import quote
-        layer_param = quote(f"{ws}:{layer_name}")
-        style_param = quote(full_style_name)
-    except Exception:
-        layer_param = f"{ws}:{layer_name}"
-        style_param = full_style_name
-        
-    return (
+    base = _public_base()
+    layer_param = _quote_layer_name(layer_name)
+    url = (
         f"{base}/gwc/service/wmts?"
         f"layer={layer_param}"
+        f"&STYLE=dwg_raster_style"
         "&tilematrixset=EPSG:900913"
         "&Service=WMTS&Request=GetTile&Version=1.0.0"
         "&Format=image/png"
-        f"&style={style_param}"
         "&TileMatrix=EPSG:900913:{z}&TileRow={y}&TileCol={x}"
     )
+    return _append_wmts_token(url, "raster", f"{settings.geoserver_workspace}:{layer_name}")
+
+
+

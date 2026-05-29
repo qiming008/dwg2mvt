@@ -2,7 +2,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DWG 转切片 - 上传与地图预览</title>
-    <script crossorigin="">import('/cadView/static/index-CuK8oRXN.js').finally(() => {
+    <script crossorigin="">import('/cadView/static/index-CFgzentQ.js').finally(() => {
             
     const qiankunLifeCycle = window.moudleQiankunAppLifeCycles && window.moudleQiankunAppLifeCycles['cadView'];
     if (qiankunLifeCycle) {
@@ -13,14 +13,21 @@
     }
   
           })</script>
-    <link rel="stylesheet" crossorigin="" href="/cadView/static/index-DJ0etYdf.css">
+    <link rel="stylesheet" crossorigin="" href="/cadView/static/index-B3KfWjwW.css">
   </head>
   <body>
     <div id="app"></div>
 
   
 
-<script>
+<style>
+  body {
+    margin: 0px;
+  }
+  div[id^='__qiankun_microapp_wrapper'] {
+      height: 100%;
+  }
+</style><script>
   const createDeffer = (hookName) => {
     const d = new Promise((resolve, reject) => {
       window.proxy && (window.proxy[`vite${hookName}`] = resolve)

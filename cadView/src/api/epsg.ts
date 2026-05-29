@@ -32,6 +32,15 @@ function normalizeItem(item: EpsgItem): CoordinateSystemOption {
   }
 }
 
+function compareByEpsgId(a: CoordinateSystemOption, b: CoordinateSystemOption) {
+  const aNum = Number(a.epsgId)
+  const bNum = Number(b.epsgId)
+  if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
+    return aNum - bNum
+  }
+  return a.epsgId.localeCompare(b.epsgId, 'zh-CN', { numeric: true })
+}
+
 export async function fetchEpsgOptions() {
   const payload = await requestJson<EpsgResponse | EpsgItem[] | CoordinateSystemOption[]>(
     API_ROUTES.epsg,
@@ -45,5 +54,7 @@ export async function fetchEpsgOptions() {
         ? payload.rows
         : []
 
-  return list.map((item) => normalizeItem(item as EpsgItem))
+  return list
+    .map((item) => normalizeItem(item as EpsgItem))
+    .sort(compareByEpsgId)
 }
